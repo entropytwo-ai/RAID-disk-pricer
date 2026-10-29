@@ -1,0 +1,1075 @@
+#!/usr/bin/env python3
+"""
+raid_architect.py — RAID planning & drive-pricing CLI.
+
+A dependency-light, single-file tool that helps you plan a RAID array and price
+the drives across three market tiers (Recertified, NAS Pro New, Enterprise New).
+
+It works with ZERO third-party packages installed (falling back to a static
+pricing baseline), and can optionally fetch *live* recertified-drive pricing
+from ServerPartDeals when ``cloudscraper`` (or plain ``requests``/``urllib``)
+is available.
+
+Two planning modes are supported:
+
+  * capacity mode  — give a target usable capacity; the tool recommends a drive
+                     count for the chosen RAID level.
+  * drives mode    — give a fixed number of drives; the tool reports the
+                     resulting usable capacity.
+
+Run ``raid_architect.py --help`` for usage and examples.
+
+Author: entropytwo-ai
+License: GPL-3.0
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+from dataclasses import dataclass, field, asdict
+from statistics import median
+from typing import Callable, Optional
+
+__version__ = "2.0.0"
+
+# ---------------------------------------------------------------------------
+# Optional dependency detection (graceful degradation is a core requirement).
+# ---------------------------------------------------------------------------
+try:
+    import cloudscraper  # type: ignore
+except ImportError:  # pragma: no cover - environment dependent
+    cloudscraper = None  # type: ignore
+
+try:
+    import requests  # type: ignore
+except ImportError:  # pragma: no cover - environment dependent
+    requests = None  # type: ignore
+
+HAVE_CLOUDSCRAPER = cloudscraper is not None
+HAVE_REQUESTS = requests is not None
+
+
+# ===========================================================================
+# Constants
+# ===========================================================================
+
+#: Static per-TB baseline rates (USD) representing early-2026 market estimates.
+HISTORICAL_RATES: dict[str, float] = {
+    "Refurb": 15.50,
+    "NAS": 22.50,
+    "Ent": 25.00,
+}
+
+#: Multipliers used to derive the new-drive tiers from a scraped refurb price.
+MARKUP_FROM_REFURB: dict[str, float] = {
+    "NAS": 1.45,
+    "Ent": 1.60,
+}
+
+#: Human-friendly tier labels for display.
+TIER_LABELS: dict[str, str] = {
+    "Refurb": "Recertified",
+    "NAS": "NAS Pro (New)",
+    "Ent": "Enterprise (New)",
+}
+
+#: Order in which tiers are displayed.
+TIER_ORDER: tuple[str, ...] = ("Refurb", "NAS", "Ent")
+
+#: Reference market links per tier (label, url).
+MARKET_LINKS: dict[str, list[tuple[str, str]]] = {
+    "Ent": [
+        ("WD Gold", "https://www.westerndigital.com/products/internal-drives/wd-gold-sata-hdd"),
+        ("Seagate Exos X24", "https://www.seagate.com/products/enterprise-drives/exos-hard-drives/"),
+    ],
+    "NAS": [
+        ("WD Red Pro", "https://www.westerndigital.com/products/internal-drives/wd-red-pro-sata-hdd"),
+        ("Seagate IronWolf Pro", "https://www.seagate.com/products/nas-drives/ironwolf-hard-drive/"),
+    ],
+    "Refurb": [
+        ("ServerPartDeals", "https://serverpartdeals.com/collections/manufacturer-recertified-drives"),
+        ("goHardDrive", "https://www.goharddrive.com/Recertified-Hard-Drives-s/25.htm"),
+    ],
+}
+
+SPD_PRODUCTS_URL = (
+    "https://serverpartdeals.com/collections/"
+    "manufacturer-recertified-drives/products.json?limit=250"
+)
+
+#: Multipliers to translate TB-like units into TB.
+UNIT_TO_TB: dict[str, float] = {
+    "TB": 1.0,
+    "T": 1.0,
+    "GB": 1.0 / 1000.0,
+    "G": 1.0 / 1000.0,
+    "PB": 1000.0,
+    "P": 1000.0,
+    "MB": 1.0 / 1_000_000.0,
+    "M": 1.0 / 1_000_000.0,
+}
+
+
+class RaidPricerError(Exception):
+    """Raised for user-facing input/validation errors (no traceback shown)."""
+
+
+# ===========================================================================
+# ANSI colour / hyperlink helpers (auto-disabled for non-TTY / NO_COLOR).
+# ===========================================================================
+
+
+@dataclass
+class Style:
+    """Terminal styling that automatically degrades for pipes / NO_COLOR."""
+
+    enabled: bool = True
+    hyperlinks: bool = True
+
+    # Raw ANSI codes (only emitted when enabled).
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN = "\033[96m"
+    WHITE = "\033[97m"
+
+    def paint(self, text: str, *codes: str) -> str:
+        if not self.enabled or not codes:
+            return text
+        return "".join(codes) + text + self.RESET
+
+    def link(self, label: str, url: str) -> str:
+        """Return an OSC 8 hyperlink, or a plain-text fallback."""
+        if self.hyperlinks and self.enabled:
+            return f"\033]8;;{url}\033\\{label}\033]8;;\033\\ ({url})"
+        return f"{label} ({url})"
+
+
+def resolve_style(stream, force_color: Optional[bool] = None,
+                  no_color_env: Optional[bool] = None) -> Style:
+    """Decide whether to emit ANSI/hyperlinks for *stream*.
+
+    Honours the ``NO_COLOR`` convention and non-TTY output; ``force_color`` can
+    override (e.g. ``--color always``).
+    """
+    if no_color_env is None:
+        no_color_env = "NO_COLOR" in os.environ
+    if force_color is True:
+        enabled = True
+    elif force_color is False:
+        enabled = False
+    else:
+        enabled = stream.isatty() and not no_color_env
+    return Style(enabled=enabled, hyperlinks=enabled)
+
+
+# ===========================================================================
+# Parsing helpers (robust replacements for fragile regex).
+# ===========================================================================
+
+
+def parse_size(value: str) -> float:
+    """Parse a capacity string into a float number of **terabytes**.
+
+    Accepts bare numbers (interpreted as TB) and values with units such as
+    ``22TB``, ``22 tb``, ``500GB``, ``2PB``. Raises :class:`RaidPricerError`
+    on malformed or non-positive input.
+    """
+    if value is None:
+        raise RaidPricerError("A size value is required.")
+    raw = str(value).strip().upper().replace(" ", "")
+    if not raw:
+        raise RaidPricerError("Empty size value.")
+
+    # Split leading numeric part from a trailing unit.
+    idx = 0
+    seen_dot = False
+    while idx < len(raw) and (raw[idx].isdigit() or (raw[idx] == "." and not seen_dot)):
+        if raw[idx] == ".":
+            seen_dot = True
+        idx += 1
+
+    number_part, unit_part = raw[:idx], raw[idx:]
+    if not number_part:
+        raise RaidPricerError(f"Could not read a number from size '{value}'.")
+
+    try:
+        number = float(number_part)
+    except ValueError:
+        raise RaidPricerError(f"Invalid numeric size '{value}'.")
+
+    unit = unit_part or "TB"
+    if unit not in UNIT_TO_TB:
+        allowed = ", ".join(sorted(UNIT_TO_TB))
+        raise RaidPricerError(
+            f"Unknown size unit '{unit_part}' in '{value}'. Use one of: {allowed}."
+        )
+
+    tb = number * UNIT_TO_TB[unit]
+    if tb <= 0:
+        raise RaidPricerError(f"Size must be positive (got '{value}').")
+    return tb
+
+
+def fmt_tb(value: float) -> str:
+    """Format a TB value cleanly (no trailing .0 for whole numbers)."""
+    if abs(value - round(value)) < 1e-9:
+        return f"{int(round(value))} TB"
+    return f"{value:.2f} TB".rstrip("0").rstrip(".") + ("" if value % 1 else " TB")
+
+
+def fmt_money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+# ===========================================================================
+# RAID level modelling.
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class RaidLevel:
+    """Static description of a RAID level and how it computes capacity."""
+
+    key: str                      # canonical key, e.g. "5", "10", "60"
+    name: str                     # display name, e.g. "RAID 5"
+    min_drives: int
+    grouped: bool                 # True for 50/60 (striped parity groups)
+    parity_per_group: int         # parity drives lost per group (0 for mirror/stripe)
+    read: str                     # qualitative read characterization
+    write: str                    # qualitative write characterization
+    summary: str                  # one-line description
+
+
+RAID_LEVELS: dict[str, RaidLevel] = {
+    "0": RaidLevel(
+        key="0", name="RAID 0", min_drives=2, grouped=False, parity_per_group=0,
+        read="Excellent (full striping across all drives)",
+        write="Excellent (full striping, no parity)",
+        summary="Striping only. Maximum speed & capacity, ZERO redundancy.",
+    ),
+    "1": RaidLevel(
+        key="1", name="RAID 1", min_drives=2, grouped=False, parity_per_group=0,
+        read="Very good (reads can be served from any mirror)",
+        write="Good (every write goes to all mirrors)",
+        summary="Mirroring. Every drive holds the same data; high redundancy, low efficiency.",
+    ),
+    "5": RaidLevel(
+        key="5", name="RAID 5", min_drives=3, grouped=False, parity_per_group=1,
+        read="Excellent (striped reads)",
+        write="Moderate (single-parity read-modify-write penalty)",
+        summary="Single distributed parity. Good balance; survives 1 drive failure.",
+    ),
+    "6": RaidLevel(
+        key="6", name="RAID 6", min_drives=4, grouped=False, parity_per_group=2,
+        read="Excellent (striped reads)",
+        write="Moderate/Slow (double-parity write penalty)",
+        summary="Dual distributed parity. Survives 2 drive failures; safer rebuilds.",
+    ),
+    "10": RaidLevel(
+        key="10", name="RAID 10", min_drives=4, grouped=False, parity_per_group=0,
+        read="Excellent (striped across mirrored pairs)",
+        write="Very good (mirror writes, no parity math)",
+        summary="Striped mirrors. Fast & resilient; 50% capacity cost.",
+    ),
+    "50": RaidLevel(
+        key="50", name="RAID 50", min_drives=6, grouped=True, parity_per_group=1,
+        read="Excellent (striped across RAID 5 groups)",
+        write="Good (parity per group, parallel across groups)",
+        summary="Striped RAID 5 groups. Survives 1 failure per group.",
+    ),
+    "60": RaidLevel(
+        key="60", name="RAID 60", min_drives=8, grouped=True, parity_per_group=2,
+        read="Excellent (striped across RAID 6 groups)",
+        write="Moderate (double parity per group, parallel across groups)",
+        summary="Striped RAID 6 groups. Survives 2 failures per group.",
+    ),
+}
+
+#: Minimum drives-per-group for grouped levels.
+MIN_GROUP_SIZE = {"50": 3, "60": 4}
+
+
+def normalize_level(level: str) -> str:
+    """Normalise a user-supplied level token to a canonical key."""
+    key = str(level).strip().upper().replace("RAID", "").strip()
+    if key in RAID_LEVELS:
+        return key
+    raise RaidPricerError(
+        f"Unsupported RAID level '{level}'. Supported: "
+        + ", ".join(sorted(RAID_LEVELS, key=lambda k: int(k)))
+    )
+
+
+def level_from_fault_tolerance(fault: int) -> str:
+    """Map a desired fault tolerance to a sensible single-array RAID level."""
+    mapping = {0: "0", 1: "5", 2: "6"}
+    if fault not in mapping:
+        raise RaidPricerError(
+            "Fault tolerance must be 0 (RAID 0), 1 (RAID 5), or 2 (RAID 6). "
+            "For higher tolerance pick RAID 10/50/60 explicitly with --level."
+        )
+    return mapping[fault]
+
+
+# ===========================================================================
+# Layout computation.
+# ===========================================================================
+
+
+@dataclass
+class RaidLayout:
+    """Computed RAID layout for a given drive count / size / level."""
+
+    level: str
+    level_name: str
+    drive_size_tb: float
+    data_drives: int                 # drives participating in the array
+    hot_spares: int                  # reserved spares (cost only, no capacity)
+    total_drives: int                # data_drives + hot_spares
+    groups: Optional[int]            # for grouped levels, else None
+    raw_capacity_tb: float           # data drives only
+    usable_capacity_tb: float
+    efficiency_pct: float            # usable / raw (data drives)
+    fault_tolerance: int             # drives that can fail without data loss
+    fault_tolerance_note: str
+    read: str
+    write: str
+    summary: str
+    min_drives: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _choose_groups(level: RaidLevel, n: int, requested_groups: Optional[int],
+                   requested_group_size: Optional[int]) -> int:
+    """Validate/choose a group count for grouped levels (50/60)."""
+    min_gsize = MIN_GROUP_SIZE[level.key]
+
+    if requested_groups is not None and requested_group_size is not None:
+        raise RaidPricerError("Specify either --groups or --group-size, not both.")
+
+    if requested_group_size is not None:
+        if requested_group_size < min_gsize:
+            raise RaidPricerError(
+                f"{level.name} needs at least {min_gsize} drives per group."
+            )
+        if n % requested_group_size != 0:
+            raise RaidPricerError(
+                f"{n} drives cannot be split into groups of {requested_group_size}."
+            )
+        groups = n // requested_group_size
+    elif requested_groups is not None:
+        groups = requested_groups
+    else:
+        # Auto-pick the largest group count whose group size is still valid,
+        # preferring 2 groups when possible for a sane default.
+        groups = None
+        for g in range(2, n // min_gsize + 1):
+            if n % g == 0 and (n // g) >= min_gsize:
+                groups = g
+                break
+        if groups is None:
+            groups = 1 if n >= min_gsize else 0
+
+    if groups < 2:
+        raise RaidPricerError(
+            f"{level.name} requires at least 2 groups (got {groups}). "
+            f"Use more drives or adjust --groups/--group-size."
+        )
+    if n % groups != 0:
+        raise RaidPricerError(
+            f"{n} drives are not evenly divisible into {groups} groups."
+        )
+    if (n // groups) < min_gsize:
+        raise RaidPricerError(
+            f"{level.name} needs >= {min_gsize} drives per group; "
+            f"{groups} groups of {n} drives gives {n // groups}."
+        )
+    return groups
+
+
+def compute_layout(level_key: str, drive_size_tb: float, data_drives: int,
+                   hot_spares: int = 0, groups: Optional[int] = None,
+                   group_size: Optional[int] = None) -> RaidLayout:
+    """Compute a full :class:`RaidLayout` from raw inputs (with validation)."""
+    level = RAID_LEVELS[level_key]
+
+    if data_drives < level.min_drives:
+        raise RaidPricerError(
+            f"{level.name} requires at least {level.min_drives} drives "
+            f"(requested {data_drives})."
+        )
+    if hot_spares < 0:
+        raise RaidPricerError("Hot spares cannot be negative.")
+
+    chosen_groups: Optional[int] = None
+    raw = data_drives * drive_size_tb
+
+    if level.key == "0":
+        usable = data_drives * drive_size_tb
+        fault = 0
+        fault_note = "None — any single drive failure loses the whole array."
+    elif level.key == "1":
+        usable = drive_size_tb
+        fault = data_drives - 1
+        fault_note = f"Survives up to {fault} failure(s) (all but one mirror)."
+    elif level.key == "5":
+        usable = (data_drives - 1) * drive_size_tb
+        fault = 1
+        fault_note = "Survives 1 drive failure."
+    elif level.key == "6":
+        usable = (data_drives - 2) * drive_size_tb
+        fault = 2
+        fault_note = "Survives 2 drive failures."
+    elif level.key == "10":
+        if data_drives % 2 != 0:
+            raise RaidPricerError("RAID 10 requires an even number of drives.")
+        usable = (data_drives // 2) * drive_size_tb
+        fault = 1
+        fault_note = (
+            "Survives 1 guaranteed failure; up to 1 per mirror "
+            f"({data_drives // 2} in the best case)."
+        )
+    elif level.key in ("50", "60"):
+        chosen_groups = _choose_groups(level, data_drives, groups, group_size)
+        parity = level.parity_per_group * chosen_groups
+        usable = (data_drives - parity) * drive_size_tb
+        fault = level.parity_per_group  # guaranteed across the array
+        per_group = level.parity_per_group
+        fault_note = (
+            f"Survives {per_group} failure(s) per group guaranteed; "
+            f"up to {parity} if spread across all {chosen_groups} groups."
+        )
+    else:  # pragma: no cover - guarded by normalize_level
+        raise RaidPricerError(f"Unhandled RAID level '{level_key}'.")
+
+    if usable <= 0:
+        raise RaidPricerError(
+            f"{level.name} with {data_drives} drives yields no usable capacity. "
+            "Add more drives."
+        )
+
+    efficiency = (usable / raw * 100.0) if raw > 0 else 0.0
+
+    return RaidLayout(
+        level=level.key,
+        level_name=level.name,
+        drive_size_tb=drive_size_tb,
+        data_drives=data_drives,
+        hot_spares=hot_spares,
+        total_drives=data_drives + hot_spares,
+        groups=chosen_groups,
+        raw_capacity_tb=raw,
+        usable_capacity_tb=usable,
+        efficiency_pct=efficiency,
+        fault_tolerance=fault,
+        fault_tolerance_note=fault_note,
+        read=level.read,
+        write=level.write,
+        summary=level.summary,
+        min_drives=level.min_drives,
+    )
+
+
+def drives_for_capacity(level_key: str, drive_size_tb: float, target_tb: float,
+                        groups: Optional[int] = None,
+                        group_size: Optional[int] = None) -> int:
+    """Return the minimum data-drive count to reach *target_tb* usable."""
+    level = RAID_LEVELS[level_key]
+    if target_tb <= 0:
+        raise RaidPricerError("Target capacity must be positive.")
+    data_slots = math.ceil(target_tb / drive_size_tb)  # drives worth of data
+
+    if level.key == "0":
+        n = max(data_slots, level.min_drives)
+    elif level.key == "1":
+        if drive_size_tb < target_tb - 1e-9:
+            raise RaidPricerError(
+                f"RAID 1 usable capacity equals a single drive ({fmt_tb(drive_size_tb)}). "
+                f"It cannot reach the target {fmt_tb(target_tb)}. Use a larger drive "
+                "or a striped level (0/5/6/10/50/60)."
+            )
+        n = 2
+    elif level.key == "5":
+        n = max(data_slots + 1, level.min_drives)
+    elif level.key == "6":
+        n = max(data_slots + 2, level.min_drives)
+    elif level.key == "10":
+        n = max(data_slots * 2, level.min_drives)
+        if n % 2:
+            n += 1
+    elif level.key in ("50", "60"):
+        # Decide group count first (default 2 groups unless specified).
+        if group_size is not None and groups is not None:
+            raise RaidPricerError("Specify either --groups or --group-size, not both.")
+        g = groups if groups is not None else 2
+        if g < 2:
+            raise RaidPricerError(f"{level.name} requires at least 2 groups.")
+        parity = level.parity_per_group * g
+        n = data_slots + parity
+        min_gsize = MIN_GROUP_SIZE[level.key]
+        # Round up to a multiple of g and respect min group size.
+        n = max(n, g * min_gsize, level.min_drives)
+        if n % g:
+            n += g - (n % g)
+    else:  # pragma: no cover
+        raise RaidPricerError(f"Unhandled RAID level '{level_key}'.")
+
+    return n
+
+
+# ===========================================================================
+# Pricing.
+# ===========================================================================
+
+
+@dataclass
+class PricingRates:
+    """Per-TB rates (USD) for each tier plus provenance metadata."""
+
+    refurb: float
+    nas: float
+    ent: float
+    source: str                 # "live", "baseline", "manual", "manual+baseline"
+    note: str = ""
+
+    def per_tb(self, tier: str) -> float:
+        return {"Refurb": self.refurb, "NAS": self.nas, "Ent": self.ent}[tier]
+
+
+@dataclass
+class TierQuote:
+    tier: str
+    label: str
+    per_tb: float
+    per_drive: float
+    total: float
+
+
+@dataclass
+class PricingResult:
+    rates: PricingRates
+    quotes: list[TierQuote] = field(default_factory=list)
+
+
+# Simple in-run cache so repeated live lookups don't re-hit the network.
+_LIVE_CACHE: dict[float, Optional[float]] = {}
+
+
+def _fetch_products_json(url: str, timeout: int = 12) -> Optional[dict]:
+    """Fetch & parse the products JSON using the best available fetcher.
+
+    Order of preference: cloudscraper (bypasses Cloudflare) -> requests -> urllib.
+    Returns ``None`` on any failure (network, HTTP, malformed JSON).
+    """
+    # 1) cloudscraper
+    if HAVE_CLOUDSCRAPER:
+        try:
+            scraper = cloudscraper.create_scraper()
+            resp = scraper.get(url, timeout=timeout)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+
+    # 2) requests
+    if HAVE_REQUESTS:
+        try:
+            resp = requests.get(url, timeout=timeout,
+                                headers={"User-Agent": "raid-architect/" + __version__})
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+
+    # 3) stdlib urllib
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "raid-architect/" + __version__}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as fh:
+            return json.loads(fh.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _extract_price_for_size(data: dict, size_tb: float) -> Optional[float]:
+    """Return the median per-TB refurb price for drives matching *size_tb*.
+
+    Scans all products/variants whose title mentions the size, collects their
+    prices, and returns the median (robust against outliers / odd variants).
+    """
+    if not isinstance(data, dict):
+        return None
+    size_int = int(size_tb) if float(size_tb).is_integer() else size_tb
+    needles = {f"{size_int}TB", f"{size_int} TB"}
+    prices: list[float] = []
+    for product in data.get("products", []):
+        title = str(product.get("title", "")).upper()
+        if not any(n.upper() in title for n in needles):
+            continue
+        for variant in product.get("variants", []):
+            try:
+                price = float(variant.get("price"))
+            except (TypeError, ValueError):
+                continue
+            # Ignore obviously broken / placeholder prices.
+            if price > 0:
+                prices.append(price)
+    if not prices:
+        return None
+    return median(prices)
+
+
+def get_live_per_tb(size_tb: float, timeout: int = 12,
+                    verbose: bool = False) -> Optional[float]:
+    """Return a live per-TB refurb rate for *size_tb*, or ``None`` on failure."""
+    if size_tb in _LIVE_CACHE:
+        return _LIVE_CACHE[size_tb]
+
+    data = _fetch_products_json(SPD_PRODUCTS_URL, timeout=timeout)
+    if data is None:
+        if verbose:
+            print("  live pricing: fetch failed; using baseline.", file=sys.stderr)
+        _LIVE_CACHE[size_tb] = None
+        return None
+
+    price = _extract_price_for_size(data, size_tb)
+    if price is None:
+        if verbose:
+            print(f"  live pricing: no {fmt_tb(size_tb)} match; using baseline.",
+                  file=sys.stderr)
+        _LIVE_CACHE[size_tb] = None
+        return None
+
+    per_tb = price / size_tb
+    _LIVE_CACHE[size_tb] = per_tb
+    return per_tb
+
+
+def resolve_rates(size_tb: float, *, want_live: bool,
+                  manual: dict[str, Optional[float]],
+                  price_per_drive: Optional[float] = None,
+                  verbose: bool = False) -> PricingRates:
+    """Resolve the per-TB rates for every tier, honouring overrides."""
+    # Start from baseline.
+    refurb = HISTORICAL_RATES["Refurb"]
+    nas = HISTORICAL_RATES["NAS"]
+    ent = HISTORICAL_RATES["Ent"]
+    source = "baseline"
+    note = "Static early-2026 estimates."
+
+    # Live pricing (only if requested).
+    if want_live:
+        live = get_live_per_tb(size_tb, verbose=verbose)
+        if live is not None:
+            refurb = live
+            nas = live * MARKUP_FROM_REFURB["NAS"]
+            ent = live * MARKUP_FROM_REFURB["Ent"]
+            source = "live"
+            note = "Live ServerPartDeals recertified pricing (median match)."
+        else:
+            source = "baseline"
+            note = "Live fetch unavailable; fell back to static baseline."
+
+    # A flat per-drive price overrides everything for the refurb tier basis.
+    if price_per_drive is not None:
+        if price_per_drive <= 0:
+            raise RaidPricerError("--price-per-drive must be positive.")
+        pdt = price_per_drive / size_tb
+        refurb = pdt
+        nas = pdt * MARKUP_FROM_REFURB["NAS"]
+        ent = pdt * MARKUP_FROM_REFURB["Ent"]
+        source = "manual"
+        note = f"Derived from --price-per-drive ({fmt_money(price_per_drive)}/drive)."
+
+    # Explicit per-TB overrides win last, per tier.
+    overridden = False
+    if manual.get("refurb") is not None:
+        refurb = manual["refurb"]; overridden = True
+    if manual.get("nas") is not None:
+        nas = manual["nas"]; overridden = True
+    if manual.get("ent") is not None:
+        ent = manual["ent"]; overridden = True
+    if overridden:
+        source = "manual" if source in ("manual", "baseline") else "manual+live"
+        note = "Manual per-TB rate override(s) applied."
+
+    for name, val in (("Refurb", refurb), ("NAS", nas), ("Ent", ent)):
+        if val <= 0:
+            raise RaidPricerError(f"{name} rate must be positive.")
+
+    return PricingRates(refurb=refurb, nas=nas, ent=ent, source=source, note=note)
+
+
+def price_layout(layout: RaidLayout, rates: PricingRates) -> PricingResult:
+    """Produce per-tier quotes for a layout (priced on TOTAL drives incl. spares)."""
+    result = PricingResult(rates=rates)
+    drives = layout.total_drives
+    size = layout.drive_size_tb
+    for tier in TIER_ORDER:
+        per_tb = rates.per_tb(tier)
+        per_drive = per_tb * size
+        total = per_drive * drives
+        result.quotes.append(
+            TierQuote(
+                tier=tier,
+                label=TIER_LABELS[tier],
+                per_tb=per_tb,
+                per_drive=per_drive,
+                total=total,
+            )
+        )
+    return result
+
+
+# ===========================================================================
+# Rendering.
+# ===========================================================================
+
+
+def _bar(pct: float, width: int = 20) -> str:
+    filled = int(round(pct / 100.0 * width))
+    filled = max(0, min(width, filled))
+    return "█" * filled + "░" * (width - filled)
+
+
+def render_report(layout: RaidLayout, pricing: PricingResult, st: Style) -> str:
+    """Render the full human-readable report for a single layout."""
+    lines: list[str] = []
+    title = f" {layout.level_name} — RAID Plan & Pricing "
+    lines.append(st.paint("═" * 62, st.CYAN))
+    lines.append(st.paint(title.center(62), st.BOLD, st.CYAN))
+    lines.append(st.paint("═" * 62, st.CYAN))
+    lines.append("")
+
+    lines.append(st.paint("Layout", st.BOLD, st.WHITE))
+    lines.append(f"  {'Level':<22}{layout.level_name}  — {layout.summary}")
+    lines.append(f"  {'Drive size':<22}{fmt_tb(layout.drive_size_tb)}")
+    grp = f"  ({layout.groups} groups)" if layout.groups else ""
+    lines.append(f"  {'Array drives':<22}{layout.data_drives}{grp}")
+    if layout.hot_spares:
+        lines.append(f"  {'Hot spares':<22}{layout.hot_spares}")
+        lines.append(f"  {'Total drives':<22}{layout.total_drives}")
+    lines.append(f"  {'Minimum drives':<22}{layout.min_drives}")
+    lines.append("")
+
+    lines.append(st.paint("Capacity", st.BOLD, st.WHITE))
+    lines.append(f"  {'Raw capacity':<22}{fmt_tb(layout.raw_capacity_tb)}")
+    lines.append(f"  {'Usable capacity':<22}"
+                 + st.paint(fmt_tb(layout.usable_capacity_tb), st.GREEN, st.BOLD))
+    eff = f"{layout.efficiency_pct:.1f}%"
+    lines.append(f"  {'Efficiency':<22}{eff}  {st.paint(_bar(layout.efficiency_pct), st.CYAN)}")
+    lines.append("")
+
+    lines.append(st.paint("Resilience & Performance", st.BOLD, st.WHITE))
+    ft = f"{layout.fault_tolerance} drive(s)"
+    ft_color = st.GREEN if layout.fault_tolerance else st.RED
+    lines.append(f"  {'Fault tolerance':<22}" + st.paint(ft, ft_color, st.BOLD))
+    lines.append(f"  {'':<22}{st.paint(layout.fault_tolerance_note, st.DIM)}")
+    lines.append(f"  {'Read':<22}{layout.read}")
+    lines.append(f"  {'Write':<22}{layout.write}")
+    lines.append("")
+
+    # Pricing table.
+    lines.append(st.paint("Pricing", st.BOLD, st.WHITE)
+                 + st.paint(f"   (source: {pricing.rates.source})", st.DIM))
+    lines.append(st.paint(f"  {pricing.rates.note}", st.DIM))
+    header = f"  {'Tier':<18}{'$/TB':>10}{'$/drive':>13}{'Total':>16}"
+    lines.append(st.paint(header, st.BOLD))
+    lines.append("  " + st.paint("─" * 55, st.DIM))
+    for q in pricing.quotes:
+        row = (f"  {q.label:<18}{fmt_money(q.per_tb):>10}"
+               f"{fmt_money(q.per_drive):>13}{fmt_money(q.total):>16}")
+        color = {"Refurb": st.GREEN, "NAS": st.YELLOW, "Ent": st.MAGENTA}[q.tier]
+        lines.append(st.paint(row, color))
+    note = f"  Totals cover all {layout.total_drives} drive(s)"
+    if layout.hot_spares:
+        note += f" (incl. {layout.hot_spares} hot spare(s))"
+    lines.append(st.paint(note + ".", st.DIM))
+    lines.append("")
+
+    # Market reference links.
+    lines.append(st.paint("Market references", st.BOLD, st.WHITE))
+    for tier in TIER_ORDER:
+        label = TIER_LABELS[tier]
+        refs = "   ".join(st.link(lbl, url) for lbl, url in MARKET_LINKS[tier])
+        lines.append(f"  {label:<18}{refs}")
+
+    return "\n".join(lines)
+
+
+def render_compare(layouts: list[tuple[RaidLayout, PricingResult]], target_tb: float,
+                   st: Style) -> str:
+    """Render a side-by-side comparison of several RAID levels for one target."""
+    lines: list[str] = []
+    lines.append(st.paint("═" * 86, st.CYAN))
+    heading = f" RAID Level Comparison — target usable ≈ {fmt_tb(target_tb)} "
+    lines.append(st.paint(heading.center(86), st.BOLD, st.CYAN))
+    lines.append(st.paint("═" * 86, st.CYAN))
+    header = (f"{'Level':<9}{'Drives':>7}{'Usable':>12}{'Eff%':>7}"
+              f"{'Tol':>5}{'Refurb $':>13}{'NAS $':>13}{'Ent $':>13}")
+    lines.append(st.paint(header, st.BOLD))
+    lines.append(st.paint("─" * 86, st.DIM))
+    for layout, pricing in layouts:
+        q = {x.tier: x for x in pricing.quotes}
+        row = (f"{layout.level_name:<9}{layout.total_drives:>7}"
+               f"{fmt_tb(layout.usable_capacity_tb):>12}"
+               f"{layout.efficiency_pct:>6.0f}%"
+               f"{layout.fault_tolerance:>5}"
+               f"{fmt_money(q['Refurb'].total):>13}"
+               f"{fmt_money(q['NAS'].total):>13}"
+               f"{fmt_money(q['Ent'].total):>13}")
+        lines.append(row)
+    lines.append(st.paint("─" * 86, st.DIM))
+    lines.append(st.paint(f"Pricing source: {layouts[0][1].rates.source} — "
+                          f"{layouts[0][1].rates.note}", st.DIM))
+    return "\n".join(lines)
+
+
+def build_json(layout: RaidLayout, pricing: PricingResult) -> dict:
+    return {
+        "version": __version__,
+        "layout": layout.to_dict(),
+        "pricing": {
+            "source": pricing.rates.source,
+            "note": pricing.rates.note,
+            "rates_per_tb": {
+                "Refurb": pricing.rates.refurb,
+                "NAS": pricing.rates.nas,
+                "Ent": pricing.rates.ent,
+            },
+            "quotes": [asdict(q) for q in pricing.quotes],
+        },
+    }
+
+
+# ===========================================================================
+# Dependency help banner.
+# ===========================================================================
+
+
+def dependency_banner(st: Style, have_cloudscraper: bool = False) -> str:
+    lines = []
+    if have_cloudscraper:
+        lines.append(st.paint(
+            "⚠ Live pricing unavailable (network/fetch failed). Using baseline.",
+            st.YELLOW))
+    else:
+        lines.append(st.paint(
+            "⚠ Live pricing fell back to the static baseline.", st.YELLOW))
+        lines.append("  For the most reliable live pricing, install cloudscraper:")
+        lines.append(st.paint("    python3 -m venv ~/raid-env", st.DIM))
+        lines.append(st.paint("    source ~/raid-env/bin/activate", st.DIM))
+        lines.append(st.paint("    pip install cloudscraper", st.DIM))
+    return "\n".join(lines)
+
+
+# ===========================================================================
+# CLI.
+# ===========================================================================
+
+
+EXAMPLES = """\
+examples:
+  # Plan for 100 TB usable on RAID 6 with 22 TB drives:
+  raid_architect.py --size 22TB --level 6 --capacity 100TB
+
+  # Fixed array: 8 x 20TB drives in RAID 10, resulting usable capacity:
+  raid_architect.py --size 20 --level 10 --drives 8
+
+  # Derive the level from a desired fault tolerance (2 -> RAID 6):
+  raid_architect.py --size 18TB --fault 2 --capacity 60TB
+
+  # RAID 60 across 2 groups with a hot spare, live pricing:
+  raid_architect.py --size 22TB --level 60 --capacity 200TB --groups 2 --hot-spare 1 --compare
+
+  # Compare every level for the same target, machine-readable:
+  raid_architect.py --size 22TB --capacity 100TB --compare-levels --json
+
+  # Override pricing manually (prices change!):
+  raid_architect.py --size 24TB --level 5 --drives 6 --rate-refurb 12.5 --rate-nas 19
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="raid_architect.py",
+        description="Plan a RAID array and price the drives across market tiers.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=EXAMPLES,
+    )
+    p.add_argument("--version", action="version",
+                   version=f"raid_architect.py {__version__}")
+
+    g_layout = p.add_argument_group("array")
+    g_layout.add_argument("-s", "--size", required=True,
+                          help="Per-drive size, e.g. 22TB, 20, 500GB, 2PB.")
+    g_layout.add_argument("-l", "--level",
+                          help="RAID level: 0, 1, 5, 6, 10, 50, 60.")
+    g_layout.add_argument("-f", "--fault", type=int,
+                          help="Desired fault tolerance (0->RAID0, 1->RAID5, 2->RAID6) "
+                               "when --level is not given.")
+    g_layout.add_argument("--groups", type=int,
+                          help="Number of parity groups for RAID 50/60.")
+    g_layout.add_argument("--group-size", type=int,
+                          help="Drives per parity group for RAID 50/60.")
+    g_layout.add_argument("--hot-spare", type=int, default=0, metavar="N",
+                          help="Reserve N hot-spare drives (cost only, no capacity).")
+
+    g_mode = p.add_argument_group("planning mode (choose one)")
+    g_mode.add_argument("-c", "--capacity",
+                        help="Target USABLE capacity; recommends a drive count.")
+    g_mode.add_argument("-d", "--drives", type=int,
+                        help="Fixed array drive count; reports usable capacity.")
+
+    g_price = p.add_argument_group("pricing")
+    g_price.add_argument("--compare", action="store_true",
+                         help="Fetch live pricing and show it (vs baseline on failure).")
+    g_price.add_argument("--historical", action="store_true",
+                         help="Force the static baseline (never hit the network).")
+    g_price.add_argument("--rate-refurb", type=float, metavar="USD",
+                         help="Override Recertified $/TB.")
+    g_price.add_argument("--rate-nas", type=float, metavar="USD",
+                         help="Override NAS Pro $/TB.")
+    g_price.add_argument("--rate-ent", type=float, metavar="USD",
+                         help="Override Enterprise $/TB.")
+    g_price.add_argument("--price-per-drive", type=float, metavar="USD",
+                         help="Known per-drive price (refurb basis); derives tiers.")
+
+    g_out = p.add_argument_group("output")
+    g_out.add_argument("--compare-levels", action="store_true",
+                       help="Tabulate ALL RAID levels for the same target.")
+    g_out.add_argument("--json", action="store_true",
+                       help="Emit machine-readable JSON instead of a table.")
+    g_out.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                       help="Colour/hyperlink output (default: auto).")
+    g_out.add_argument("--timeout", type=int, default=12,
+                       help="Live-pricing network timeout in seconds (default: 12).")
+
+    return p
+
+
+def _select_level(args) -> str:
+    if args.level is not None:
+        return normalize_level(args.level)
+    if args.fault is not None:
+        return level_from_fault_tolerance(args.fault)
+    return "5"  # sensible default
+
+
+def run(argv: Optional[list[str]] = None, *,
+        stdout=None, stderr=None) -> int:
+    """Programmatic entry point. Returns a process exit code."""
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    force_color = {"auto": None, "always": True, "never": False}[args.color]
+    # JSON output is always plain.
+    st = resolve_style(stdout, force_color=False if args.json else force_color)
+
+    try:
+        size_tb = parse_size(args.size)
+
+        if args.capacity is None and args.drives is None:
+            raise RaidPricerError(
+                "Choose a planning mode: --capacity <TB> (target) "
+                "or --drives <N> (fixed array)."
+            )
+        if args.capacity is not None and args.drives is not None:
+            raise RaidPricerError("Use either --capacity or --drives, not both.")
+
+        want_live = args.compare and not args.historical
+        manual = {"refurb": args.rate_refurb, "nas": args.rate_nas, "ent": args.rate_ent}
+
+        # ---- Compare-levels view ------------------------------------------
+        if args.compare_levels:
+            if args.capacity is None:
+                raise RaidPricerError("--compare-levels requires --capacity <TB>.")
+            target = parse_size(args.capacity)
+            rates = resolve_rates(size_tb, want_live=want_live, manual=manual,
+                                  price_per_drive=args.price_per_drive,
+                                  verbose=True)
+            rows: list[tuple[RaidLayout, PricingResult]] = []
+            for key in sorted(RAID_LEVELS, key=lambda k: int(k)):
+                try:
+                    n = drives_for_capacity(key, size_tb, target)
+                    layout = compute_layout(key, size_tb, n,
+                                            hot_spares=args.hot_spare)
+                    pricing = price_layout(layout, rates)
+                    rows.append((layout, pricing))
+                except RaidPricerError:
+                    continue  # skip levels that can't satisfy the target
+            if not rows:
+                raise RaidPricerError("No RAID level could satisfy that target.")
+            if args.json:
+                payload = {
+                    "version": __version__,
+                    "target_tb": target,
+                    "drive_size_tb": size_tb,
+                    "levels": [build_json(l, p) for l, p in rows],
+                }
+                print(json.dumps(payload, indent=2), file=stdout)
+            else:
+                print(render_compare(rows, target, st), file=stdout)
+            return 0
+
+        # ---- Single-level plan --------------------------------------------
+        level_key = _select_level(args)
+
+        if args.capacity is not None:
+            target = parse_size(args.capacity)
+            n = drives_for_capacity(level_key, size_tb, target,
+                                    groups=args.groups, group_size=args.group_size)
+        else:
+            n = args.drives
+            if n is None or n <= 0:
+                raise RaidPricerError("--drives must be a positive integer.")
+
+        layout = compute_layout(level_key, size_tb, n,
+                                hot_spares=args.hot_spare,
+                                groups=args.groups, group_size=args.group_size)
+        rates = resolve_rates(size_tb, want_live=want_live, manual=manual,
+                              price_per_drive=args.price_per_drive, verbose=True)
+        pricing = price_layout(layout, rates)
+
+        if args.json:
+            print(json.dumps(build_json(layout, pricing), indent=2), file=stdout)
+        else:
+            # Only warn when live pricing was wanted but we fell back to baseline.
+            if want_live and pricing.rates.source == "baseline":
+                print(dependency_banner(st, have_cloudscraper=HAVE_CLOUDSCRAPER),
+                      file=stderr)
+                print("", file=stdout)
+            print(render_report(layout, pricing, st), file=stdout)
+        return 0
+
+    except RaidPricerError as exc:
+        msg = f"error: {exc}"
+        print(st.paint(msg, st.RED) if st.enabled else msg, file=stderr)
+        return 2
+    except KeyboardInterrupt:  # pragma: no cover
+        print("\nAborted.", file=stderr)
+        return 130
+
+
+def main() -> None:
+    sys.exit(run())
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,13 @@
+# raid_architect.py runs with ZERO third-party packages installed.
+# Everything below is OPTIONAL and only enables *live* drive pricing.
+#
+# Install into a virtualenv if you want live ServerPartDeals pricing:
+#   python3 -m venv ~/raid-env && source ~/raid-env/bin/activate
+#   pip install -r requirements.txt
+#
+# ---- optional: live pricing ------------------------------------------------
+cloudscraper>=1.2.60   # preferred fetcher (bypasses Cloudflare)
+requests>=2.25.0       # fallback fetcher (urllib from the stdlib is used otherwise)
+
+# ---- optional: development / tests ----------------------------------------
+# pytest>=7.0          # the test suite also runs under the stdlib `unittest`

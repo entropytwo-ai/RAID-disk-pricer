@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "raid-architect"
+version = "2.0.0"
+description = "Dependency-light RAID planning & drive-pricing CLI."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "entropytwo-ai" }]
+keywords = ["raid", "storage", "nas", "pricing", "cli", "hard-drives"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Systems Administration",
+]
+# No required runtime dependencies — the tool works with zero third-party packages.
+dependencies = []
+
+[project.optional-dependencies]
+# Live pricing (optional). Install with:  pip install "raid-architect[live]"
+live = ["cloudscraper>=1.2.60", "requests>=2.25.0"]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/entropytwo-ai/RAID-disk-pricer"
+Repository = "https://github.com/entropytwo-ai/RAID-disk-pricer"
+
+[project.scripts]
+raid-architect = "raid_architect:main"
+raid-pricer = "raid_architect:main"
+
+[tool.setuptools]
+py-modules = ["raid_architect"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
