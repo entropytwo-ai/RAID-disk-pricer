@@ -40,7 +40,9 @@ available.
 Prefer not to install anything? A hosted web UI is available — open it in any
 browser (desktop or mobile):
 
-### 🌐 **[https://24ff2001c.abacusai.cloud](https://24ff2001c.abacusai.cloud)**
+### 🌐 **[https://raid-architect.abacusai.cloud](https://raid-architect.abacusai.cloud)**
+
+(The original `https://24ff2001c.abacusai.cloud` URL also still works.)
 
 The web app uses the **exact same** calculation and pricing engine as the CLI
 (`raid_architect.py` is imported directly — there is one source of truth). Fill
@@ -53,12 +55,12 @@ It also exposes a small JSON API if you want to script against it:
 
 ```bash
 # Single-level plan
-curl -s -X POST https://24ff2001c.abacusai.cloud/api/plan \
+curl -s -X POST https://raid-architect.abacusai.cloud/api/plan \
   -H 'Content-Type: application/json' \
   -d '{"size":"22TB","capacity":"340TB","level":"6","pricing_source":"baseline"}'
 
 # Compare every applicable level for a target
-curl -s -X POST https://24ff2001c.abacusai.cloud/api/compare \
+curl -s -X POST https://raid-architect.abacusai.cloud/api/compare \
   -H 'Content-Type: application/json' \
   -d '{"size":"22TB","capacity":"100TB","pricing_source":"baseline"}'
 ```
@@ -443,7 +445,8 @@ bash deploy/install.sh
 
 That installs `flask`/`gunicorn` into `/opt/abacus-python`, links
 `deploy/raid-web.service` → `/etc/systemd/system/`, links
-`deploy/24ff2001c.conf` → `/etc/nginx/conf.d/`, enables the service and reloads
+`deploy/24ff2001c.conf` and `deploy/raid-architect.conf` → `/etc/nginx/conf.d/`,
+enables the service and reloads
 nginx. The vhost sends a `Cache-Control` header and
 `Content-Security-Policy: frame-ancestors 'self' https://*.abacus.ai` (and sets
 no `X-Frame-Options`) so the app renders in the platform's iframe preview.
@@ -453,7 +456,7 @@ no `X-Frame-Options`) so the app renders in the platform's iframe preview.
 ```bash
 sudo systemctl disable --now raid-web
 sudo rm /etc/systemd/system/raid-web.service
-sudo rm /etc/nginx/conf.d/24ff2001c.conf
+sudo rm /etc/nginx/conf.d/24ff2001c.conf /etc/nginx/conf.d/raid-architect.conf
 sudo systemctl daemon-reload && sudo nginx -t && sudo systemctl reload nginx
 ```
 

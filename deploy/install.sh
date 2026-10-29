@@ -7,7 +7,8 @@ PROJECT_DIR="/home/ubuntu/RAID-disk-pricer"
 PY="/opt/abacus-python/bin/python3"
 PIP="/opt/abacus-python/bin/pip"
 SERVICE="raid-web"
-VHOST="24ff2001c.conf"
+# All nginx vhosts shipped with the project (default hostname + friendly hostname).
+VHOSTS=("24ff2001c.conf" "raid-architect.conf")
 
 cd "$PROJECT_DIR"
 
@@ -20,8 +21,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE"
 sudo systemctl restart "$SERVICE"
 
-echo "==> Linking nginx vhost"
-sudo ln -sf "$PROJECT_DIR/deploy/${VHOST}" "/etc/nginx/conf.d/${VHOST}"
+echo "==> Linking nginx vhosts"
+for VHOST in "${VHOSTS[@]}"; do
+    sudo ln -sf "$PROJECT_DIR/deploy/${VHOST}" "/etc/nginx/conf.d/${VHOST}"
+done
 sudo nginx -t
 sudo systemctl reload nginx
 
