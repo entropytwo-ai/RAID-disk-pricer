@@ -13,6 +13,7 @@ available.
 
 ## Table of Contents
 
+- [Use it online (no install)](#use-it-online-no-install)
 - [Overview](#overview)
 - [Features](#features)
 - [Installation](#installation)
@@ -28,8 +29,45 @@ available.
 - [Pricing sources & disclaimer](#pricing-sources--disclaimer)
 - [JSON output](#json-output)
 - [Testing](#testing)
+- [Web app (self-hosting)](#web-app-self-hosting)
 - [Contributing](#contributing)
 - [License](#license)
+
+---
+
+## Use it online (no install)
+
+Prefer not to install anything? A hosted web UI is available — open it in any
+browser (desktop or mobile):
+
+### 🌐 **[https://24ff2001c.abacusai.cloud](https://24ff2001c.abacusai.cloud)**
+
+The web app uses the **exact same** calculation and pricing engine as the CLI
+(`raid_architect.py` is imported directly — there is one source of truth). Fill
+in the form, pick a RAID level (or a fault-tolerance target), choose a planning
+mode (target capacity **or** fixed drive count), and get the full layout,
+resilience, performance and three-tier pricing — plus a side-by-side
+*Compare all levels* table.
+
+It also exposes a small JSON API if you want to script against it:
+
+```bash
+# Single-level plan
+curl -s -X POST https://24ff2001c.abacusai.cloud/api/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"size":"22TB","capacity":"340TB","level":"6","pricing_source":"baseline"}'
+
+# Compare every applicable level for a target
+curl -s -X POST https://24ff2001c.abacusai.cloud/api/compare \
+  -H 'Content-Type: application/json' \
+  -d '{"size":"22TB","capacity":"100TB","pricing_source":"baseline"}'
+```
+
+> The same pricing disclaimer applies online: *live* figures reflect a single
+> retailer at one moment, and the *baseline* is a rough early-2026 estimate.
+> See [Pricing sources & disclaimer](#pricing-sources--disclaimer).
+
+[↑ back to contents](#table-of-contents)
 
 ---
 
@@ -369,6 +407,54 @@ runs under both `pytest` and the stdlib `unittest` (no deps required):
 python3 -m unittest discover -s tests -v
 # or
 pytest -q
+```
+
+[↑ back to contents](#table-of-contents)
+
+---
+
+## Web app (self-hosting)
+
+The browser UI is a thin Flask layer over `raid_architect.py` — it imports the
+library functions, so there is no duplicated RAID/pricing logic.
+
+```
+webapp.py            Flask backend (routes: / , /api/levels, /api/plan, /api/compare, /healthz)
+static/              Single-page frontend (index.html, style.css, app.js) — no build step, no framework
+deploy/              systemd unit + nginx vhost + idempotent install.sh
+```
+
+**Run locally:**
+
+```bash
+pip install flask gunicorn        # web-only deps (the CLI never needs these)
+python3 webapp.py                 # dev server on http://127.0.0.1:8137
+# or production:
+gunicorn --workers 2 --bind 127.0.0.1:8137 webapp:app
+```
+
+**Deploy behind nginx (Abacus supercomputer, Pattern A):** the unit file and
+vhost live in `deploy/` and are symlinked into `/etc`. One command sets it up and
+is safe to re-run (e.g. after an image update):
+
+```bash
+bash deploy/install.sh
+```
+
+That installs `flask`/`gunicorn` into `/opt/abacus-python`, links
+`deploy/raid-web.service` → `/etc/systemd/system/`, links
+`deploy/24ff2001c.conf` → `/etc/nginx/conf.d/`, enables the service and reloads
+nginx. The vhost sends a `Cache-Control` header and
+`Content-Security-Policy: frame-ancestors 'self' https://*.abacus.ai` (and sets
+no `X-Frame-Options`) so the app renders in the platform's iframe preview.
+
+**Tear down:**
+
+```bash
+sudo systemctl disable --now raid-web
+sudo rm /etc/systemd/system/raid-web.service
+sudo rm /etc/nginx/conf.d/24ff2001c.conf
+sudo systemctl daemon-reload && sudo nginx -t && sudo systemctl reload nginx
 ```
 
 [↑ back to contents](#table-of-contents)

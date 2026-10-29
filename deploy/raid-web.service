@@ -1,0 +1,24 @@
+[Unit]
+Description=RAID Architect web app (Flask + gunicorn)
+After=network-online.target
+Wants=network-online.target
+# /home/ubuntu mounts late at boot (nofail) — never start before the project files exist.
+RequiresMountsFor=/home/ubuntu
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/RAID-disk-pricer
+Environment=RAID_WEB_PORT=8137
+# Absolute interpreter path: systemd units inherit none of the login shell's PATH.
+ExecStart=/opt/abacus-python/bin/gunicorn \
+    --workers 2 \
+    --bind 127.0.0.1:8137 \
+    --timeout 30 \
+    --access-logfile - \
+    --error-logfile - \
+    webapp:app
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

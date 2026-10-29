@@ -9,5 +9,12 @@
 cloudscraper>=1.2.60   # preferred fetcher (bypasses Cloudflare)
 requests>=2.25.0       # fallback fetcher (urllib from the stdlib is used otherwise)
 
+# ---- web app (hosted UI) --------------------------------------------------
+# Required ONLY for the browser UI (webapp.py); the CLI never needs these.
+# Installed into the systemd interpreter with:
+#   /opt/abacus-python/bin/pip install flask gunicorn
+flask>=3.0            # web framework for webapp.py
+gunicorn>=21.0        # production WSGI server used by the systemd unit
+
 # ---- optional: development / tests ----------------------------------------
 # pytest>=7.0          # the test suite also runs under the stdlib `unittest`

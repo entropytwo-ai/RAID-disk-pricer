@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAID Architect — plan &amp; price your array</title>
+<meta name="description" content="Plan a RAID array and price the drives across Recertified, NAS Pro and Enterprise tiers — right in your browser.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💽</text></svg>">
+<link rel="stylesheet" href="/static/style.css?v=1">
+</head>
+<body>
+<header class="site-header">
+  <div class="wrap header-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">💽</span>
+      <div>
+        <h1>RAID&nbsp;Architect</h1>
+        <p class="tagline">Plan your array &amp; price the drives — no install required.</p>
+      </div>
+    </div>
+    <a class="gh-link" href="https://github.com/entropytwo-ai/RAID-disk-pricer" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<main class="wrap layout">
+  <!-- ============ FORM ============ -->
+  <section class="card form-card" aria-label="Array configuration">
+    <form id="planForm" novalidate>
+      <h2 class="card-title">Configure</h2>
+
+      <div class="field">
+        <label for="size">Per-drive size</label>
+        <input type="text" id="size" name="size" value="22TB" inputmode="text"
+               placeholder="e.g. 22TB, 20, 500GB, 2PB" required>
+        <small>Accepts TB (default), GB, PB or a bare number.</small>
+      </div>
+
+      <fieldset class="field mode-switch">
+        <legend>Planning mode</legend>
+        <div class="seg">
+          <input type="radio" id="mode-cap" name="mode" value="capacity" checked>
+          <label for="mode-cap">Target capacity</label>
+          <input type="radio" id="mode-drv" name="mode" value="drives">
+          <label for="mode-drv">Fixed drives</label>
+        </div>
+      </fieldset>
+
+      <div class="field" id="capacityField">
+        <label for="capacity">Target usable capacity</label>
+        <input type="text" id="capacity" name="capacity" value="340TB"
+               placeholder="e.g. 100TB">
+        <small>We recommend the drive count to reach this.</small>
+      </div>
+
+      <div class="field hidden" id="drivesField">
+        <label for="drives">Number of array drives</label>
+        <input type="number" id="drives" name="drives" min="2" step="1" value="8"
+               placeholder="e.g. 8">
+        <small>We report the resulting usable capacity.</small>
+      </div>
+
+      <div class="grid2">
+        <div class="field">
+          <label for="level">RAID level</label>
+          <select id="level" name="level">
+            <option value="">Auto (from fault tolerance)</option>
+          </select>
+        </div>
+        <div class="field" id="faultField">
+          <label for="fault">Fault tolerance</label>
+          <select id="fault" name="fault">
+            <option value="">—</option>
+            <option value="0">0 → RAID 0</option>
+            <option value="1">1 → RAID 5</option>
+            <option value="2" selected>2 → RAID 6</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid2" id="groupRow">
+        <div class="field">
+          <label for="groups">Parity groups <span class="muted">(50/60)</span></label>
+          <input type="number" id="groups" name="groups" min="2" step="1" placeholder="auto">
+        </div>
+        <div class="field">
+          <label for="group_size">Drives / group <span class="muted">(50/60)</span></label>
+          <input type="number" id="group_size" name="group_size" min="3" step="1" placeholder="auto">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="hot_spare">Hot spares</label>
+        <input type="number" id="hot_spare" name="hot_spare" min="0" step="1" value="0">
+        <small>Reserved spares — add to cost, not usable capacity.</small>
+      </div>
+
+      <details class="pricing-block">
+        <summary>Pricing options</summary>
+
+        <fieldset class="field">
+          <legend>Pricing source</legend>
+          <div class="seg">
+            <input type="radio" id="src-base" name="pricing_source" value="baseline" checked>
+            <label for="src-base">Baseline</label>
+            <input type="radio" id="src-live" name="pricing_source" value="live">
+            <label for="src-live">Live</label>
+          </div>
+          <small id="sourceHint" class="hint"></small>
+        </fieldset>
+
+        <div class="grid3">
+          <div class="field">
+            <label for="rate_refurb">Recertified $/TB</label>
+            <input type="number" id="rate_refurb" name="rate_refurb" step="0.01" placeholder="auto">
+          </div>
+          <div class="field">
+            <label for="rate_nas">NAS Pro $/TB</label>
+            <input type="number" id="rate_nas" name="rate_nas" step="0.01" placeholder="auto">
+          </div>
+          <div class="field">
+            <label for="rate_ent">Enterprise $/TB</label>
+            <input type="number" id="rate_ent" name="rate_ent" step="0.01" placeholder="auto">
+          </div>
+        </div>
+        <div class="field">
+          <label for="price_per_drive">Known price per drive (optional)</label>
+          <input type="number" id="price_per_drive" name="price_per_drive" step="0.01" placeholder="e.g. 299.00">
+          <small>Overrides the refurb basis; new tiers derived from it.</small>
+        </div>
+      </details>
+
+      <div class="actions">
+        <button type="submit" class="btn primary" id="planBtn">Plan array</button>
+        <button type="button" class="btn" id="compareBtn">Compare all levels</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- ============ RESULTS ============ -->
+  <section class="results-col" aria-live="polite">
+    <div id="statusBox" class="status hidden"></div>
+
+    <!-- single plan -->
+    <div id="planResult" class="card result-card hidden">
+      <div class="result-head">
+        <h2 id="planLevelName">RAID</h2>
+        <span class="src-badge" id="planSource"></span>
+      </div>
+      <p class="summary" id="planSummary"></p>
+
+      <div class="stat-grid">
+        <div class="stat"><span class="stat-label">Usable</span><span class="stat-val accent" id="statUsable">—</span></div>
+        <div class="stat"><span class="stat-label">Raw</span><span class="stat-val" id="statRaw">—</span></div>
+        <div class="stat"><span class="stat-label">Drives</span><span class="stat-val" id="statDrives">—</span></div>
+        <div class="stat"><span class="stat-label">Fault tolerance</span><span class="stat-val" id="statFault">—</span></div>
+      </div>
+
+      <div class="eff-wrap">
+        <div class="eff-top"><span>Capacity efficiency</span><span id="effPct">—</span></div>
+        <div class="bar"><div class="bar-fill" id="effBar"></div></div>
+      </div>
+
+      <table class="mini-table">
+        <tbody>
+          <tr><th>Min drives</th><td id="rowMin">—</td></tr>
+          <tr><th>Resilience</th><td id="rowFaultNote">—</td></tr>
+          <tr><th>Read</th><td id="rowRead">—</td></tr>
+          <tr><th>Write</th><td id="rowWrite">—</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="section-h">Pricing <span class="muted" id="priceNote"></span></h3>
+      <div class="table-scroll">
+        <table class="price-table">
+          <thead><tr><th>Tier</th><th class="num">$/TB</th><th class="num">$/drive</th><th class="num">Total</th></tr></thead>
+          <tbody id="priceBody"></tbody>
+        </table>
+      </div>
+
+      <h3 class="section-h">Market references</h3>
+      <div id="marketLinks" class="market"></div>
+    </div>
+
+    <!-- compare -->
+    <div id="compareResult" class="card result-card hidden">
+      <div class="result-head">
+        <h2>Level comparison</h2>
+        <span class="src-badge" id="cmpSource"></span>
+      </div>
+      <p class="summary" id="cmpTarget"></p>
+      <div class="table-scroll">
+        <table class="price-table compare">
+          <thead><tr>
+            <th>Level</th><th class="num">Drives</th><th class="num">Usable</th>
+            <th class="num">Eff%</th><th class="num">Tol</th>
+            <th class="num">Recert.</th><th class="num">NAS</th><th class="num">Ent.</th>
+          </tr></thead>
+          <tbody id="cmpBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card disclaimer">
+      <strong>⚠ Pricing disclaimer.</strong>
+      <span id="disclaimerText">
+        Drive prices are volatile and vary by region, capacity, seller and availability.
+        <em>Live</em> figures reflect a single retailer (ServerPartDeals) at one moment in time;
+        the <em>baseline</em> is a rough early-2026 estimate. Always verify current prices before buying.
+        This tool is for planning only and is not affiliated with any retailer or manufacturer.
+      </span>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>RAID Architect — one source of truth with the <code>raid_architect.py</code> CLI.</span>
+    <span class="muted" id="verTag"></span>
+  </div>
+</footer>
+
+<script src="/static/app.js?v=1"></script>
+</body>
+</html>
