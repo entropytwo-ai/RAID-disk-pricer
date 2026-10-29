@@ -1,5 +1,7 @@
 # RAID Architect — RAID planning & drive-pricing CLI
 
+> 🌐 **Use it online (no install):** **[raid-architect.abacusai.cloud](https://raid-architect.abacusai.cloud)**
+
 A dependency-light, single-file Python CLI that helps you **plan a RAID array**
 and **price the drives** across three market tiers (Recertified, NAS Pro New,
 Enterprise New).
