@@ -937,9 +937,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     g_price = p.add_argument_group("pricing")
     g_price.add_argument("--compare", action="store_true",
-                         help="Fetch live pricing and show it (vs baseline on failure).")
-    g_price.add_argument("--historical", action="store_true",
-                         help="Force the static baseline (never hit the network).")
+                         help="Deprecated: live pricing is now the default. Kept as a "
+                              "no-op for backward compatibility.")
+    g_price.add_argument("--historical", "--baseline", action="store_true",
+                         help="Force the static baseline (never hit the network). "
+                              "By default the tool fetches live pricing.")
     g_price.add_argument("--rate-refurb", type=float, metavar="USD",
                          help="Override Recertified $/TB.")
     g_price.add_argument("--rate-nas", type=float, metavar="USD",
@@ -993,7 +995,8 @@ def run(argv: Optional[list[str]] = None, *,
         if args.capacity is not None and args.drives is not None:
             raise RaidPricerError("Use either --capacity or --drives, not both.")
 
-        want_live = args.compare and not args.historical
+        # Live pricing is the default; --historical forces the static baseline.
+        want_live = not args.historical
         manual = {"refurb": args.rate_refurb, "nas": args.rate_nas, "ent": args.rate_ent}
 
         # ---- Compare-levels view ------------------------------------------

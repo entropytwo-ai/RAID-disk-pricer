@@ -59,12 +59,12 @@ It also exposes a small JSON API if you want to script against it:
 # Single-level plan
 curl -s -X POST https://raid-architect.abacusai.cloud/api/plan \
   -H 'Content-Type: application/json' \
-  -d '{"size":"22TB","capacity":"340TB","level":"6","pricing_source":"baseline"}'
+  -d '{"size":"22TB","capacity":"340TB","level":"6"}'
 
 # Compare every applicable level for a target
 curl -s -X POST https://raid-architect.abacusai.cloud/api/compare \
   -H 'Content-Type: application/json' \
-  -d '{"size":"22TB","capacity":"100TB","pricing_source":"baseline"}'
+  -d '{"size":"22TB","capacity":"100TB"}'
 ```
 
 > The same pricing disclaimer applies online: *live* figures reflect a single
@@ -210,8 +210,9 @@ planning mode (choose one):
   -d, --drives N          Fixed array drive count; reports usable capacity.
 
 pricing:
-      --compare           Fetch live pricing (falls back to baseline on failure).
+      --compare           Deprecated no-op (live pricing is now the default).
       --historical        Force the static baseline (never hit the network).
+                          (alias: --baseline)
       --rate-refurb USD   Override Recertified $/TB.
       --rate-nas USD      Override NAS Pro $/TB.
       --rate-ent USD      Override Enterprise $/TB.
@@ -344,12 +345,14 @@ Three tiers are reported:
 
 **How pricing is resolved (in order):**
 
-1. **Static baseline** — built-in early-2026 estimates. Always available, no network.
-2. **Live** (`--compare`) — scrapes ServerPartDeals `products.json`, matches the
+1. **Live (default)** — scrapes ServerPartDeals `products.json`, matches the
    requested size, and takes the **median** price across matching variants. The
    fetcher is chosen automatically: `cloudscraper` → `requests` → stdlib
    `urllib`. New-drive tiers are derived from the live refurb price via fixed
-   markups. On any timeout/HTTP/JSON error it falls back to the baseline.
+   markups. On any timeout/HTTP/JSON error it falls back to the baseline. Pass
+   `--historical` (alias `--baseline`) to skip the network and force the baseline.
+2. **Static baseline** — built-in early-2026 estimates. Always available, no
+   network; used on `--historical` or whenever a live fetch fails.
 3. **Manual overrides** — `--rate-*` ($/TB) or `--price-per-drive` always win,
    so you can plug in a quote you already have.
 

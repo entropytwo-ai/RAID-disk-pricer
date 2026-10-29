@@ -80,7 +80,7 @@ def _select_level(data: dict) -> str:
 
 def _resolve_rates_from(data: dict, size_tb: float) -> ra.PricingRates:
     """Build pricing rates honouring the UI's source + override inputs."""
-    source = str(data.get("pricing_source", "baseline")).lower()
+    source = str(data.get("pricing_source", "live")).lower()
     want_live = source == "live"
     manual = {
         "refurb": _opt_float(data, "rate_refurb"),
