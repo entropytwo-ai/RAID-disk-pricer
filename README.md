@@ -478,14 +478,14 @@ never a 500.
 
 ### Web UI
 
-On wide screens the best deals appear as **rails down the left and right sides**
-of the planner (planner stays centered), with appealing cards that lead with the
-`$/TB`, plus capacity, price, a colour-coded condition badge, retailer, rank
-badge and a link that opens the product page in a new tab (`rel="noopener"`).
-On narrow / mobile widths the rails **collapse into a single stacked grid**
-below the planner (no overlap, nothing disappears). The rails load
-asynchronously from `/api/deals` with a loading skeleton and a clean empty
-state, and highlight any deal whose capacity matches the drive size you're
+The best deals appear in a single **full-width grid below the main planner**, so
+the widened planner has room for its controls and results without crowding. Each
+card leads with the `$/TB`, plus capacity, price, a colour-coded condition badge,
+retailer, rank badge and a link that opens the product page in a new tab
+(`rel="noopener"`). The grid reflows responsively — three or more columns on wide
+screens down to a single column on mobile (nothing overlaps or disappears). It
+loads asynchronously from `/api/deals` with a loading skeleton and a clean empty
+state, and highlights any deal whose capacity matches the drive size you're
 planning with.
 
 > **Disclaimer:** Drive deals are volatile and vary by region, capacity, seller

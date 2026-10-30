@@ -6,7 +6,7 @@
 <title>RAID Architect — plan &amp; price your array</title>
 <meta name="description" content="Plan a RAID array and price the drives across Recertified, NAS Pro and Enterprise tiers — right in your browser.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💽</text></svg>">
-<link rel="stylesheet" href="/static/style.css?v=4">
+<link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 <header class="site-header">
@@ -22,19 +22,7 @@
   </div>
 </header>
 
-<div class="app-shell">
-
-  <!-- ============ LEFT DEALS RAIL ============ -->
-  <aside class="deal-rail deal-rail-left" id="dealRailLeft" aria-label="Best hard-drive deals">
-    <div class="rail-head">
-      <h2 class="rail-title">💰 Best deals</h2>
-      <p class="rail-sub">Live listings ranked by <strong>$/TB</strong> — best value first.</p>
-      <p class="rail-status" id="dealStatus">Loading live deals…</p>
-    </div>
-    <div class="deal-cards" id="dealCardsLeft" aria-busy="true"></div>
-  </aside>
-
-  <main class="wrap layout center-app">
+  <main class="wrap layout">
   <!-- ============ FORM ============ -->
   <section class="card form-card" aria-label="Array configuration">
     <form id="planForm" novalidate>
@@ -238,16 +226,15 @@
   </section>
   </main>
 
-  <!-- ============ RIGHT DEALS RAIL ============ -->
-  <aside class="deal-rail deal-rail-right" id="dealRailRight" aria-label="More hard-drive deals">
+  <!-- ============ BEST DEALS (full-width, below the main interface) ============ -->
+  <section class="wrap deals-section" aria-label="Best hard-drive deals">
     <div class="rail-head">
-      <h2 class="rail-title">More deals</h2>
-      <p class="rail-sub">Next-best <strong>$/TB</strong>.</p>
+      <h2 class="rail-title">💰 Best deals</h2>
+      <p class="rail-sub">Live listings ranked by <strong>$/TB</strong> — best value first.</p>
+      <p class="rail-status" id="dealStatus">Loading live deals…</p>
     </div>
-    <div class="deal-cards" id="dealCardsRight"></div>
-  </aside>
-
-</div>
+    <div class="deal-cards" id="dealCards" aria-busy="true"></div>
+  </section>
 
 <footer class="site-footer">
   <div class="wrap">
@@ -256,6 +243,6 @@
   </div>
 </footer>
 
-<script src="/static/app.js?v=4"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

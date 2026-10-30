@@ -302,16 +302,15 @@ function dealCard(d, rank) {
 }
 
 function renderDealsEmpty(msg) {
-  $("dealCardsLeft").innerHTML = `<div class="rail-empty">${msg}</div>`;
-  $("dealCardsLeft").removeAttribute("aria-busy");
-  $("dealCardsRight").innerHTML = "";
-  $("dealRailRight").classList.add("hidden");
+  const el = $("dealCards");
+  el.innerHTML = `<div class="rail-empty">${msg}</div>`;
+  el.removeAttribute("aria-busy");
 }
 
 function renderDeals(result) {
-  const left = $("dealCardsLeft"), right = $("dealCardsRight");
-  left.innerHTML = ""; right.innerHTML = "";
-  left.removeAttribute("aria-busy");
+  const container = $("dealCards");
+  container.innerHTML = "";
+  container.removeAttribute("aria-busy");
   const deals = (result && result.deals) || [];
   const status = $("dealStatus");
 
@@ -329,9 +328,7 @@ function renderDeals(result) {
   status.innerHTML = `Live from <strong>${escapeHtml(ok.join(", ") || "—")}</strong>`
     + (bad.length ? ` · ${escapeHtml(bad.join(", "))} unavailable` : "");
 
-  const half = Math.ceil(deals.length / 2);
-  deals.forEach((d, i) => (i < half ? left : right).appendChild(dealCard(d, i + 1)));
-  $("dealRailRight").classList.toggle("hidden", right.children.length === 0);
+  deals.forEach((d, i) => container.appendChild(dealCard(d, i + 1)));
   highlightDealsForSize(LAST_PLAN_SIZE_TB);
 }
 
@@ -345,8 +342,8 @@ function highlightDealsForSize(sizeTb) {
 
 async function loadDeals() {
   if (DEALS_LOADED) return;
-  const left = $("dealCardsLeft");
-  left.innerHTML = Array.from({ length: 4 })
+  const container = $("dealCards");
+  container.innerHTML = Array.from({ length: 8 })
     .map(() => '<div class="deal-skeleton"></div>').join("");
   try {
     const res = await fetch("/api/deals?limit=12");

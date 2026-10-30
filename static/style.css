@@ -14,7 +14,7 @@
   --red: #f87171;
   --radius: 14px;
   --shadow: 0 10px 30px rgba(0,0,0,.35);
-  --maxw: 1100px;
+  --maxw: 1320px;
 }
 
 * { box-sizing: border-box; }
@@ -178,27 +178,15 @@ fieldset { border: none; margin: 0; padding: 0; }
 .site-footer .wrap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .site-footer code { background: var(--bg-elev2); padding: 2px 6px; border-radius: 6px; }
 
-/* ===== Best-deals rails (left/right on wide, stacked on narrow) ===== */
-.app-shell {
-  display: grid;
-  grid-template-columns: 1fr minmax(0, var(--maxw)) 1fr;
-  grid-template-areas: "left center right";
-  gap: 18px;
-  align-items: start;
-  padding: 0 16px;
-}
-.center-app { grid-area: center; }
-.deal-rail-left { grid-area: left; }
-.deal-rail-right { grid-area: right; }
-
-.deal-rail { justify-self: center; width: 100%; max-width: 300px;
-  padding-top: 28px; position: sticky; top: 82px; }
-.rail-head { margin-bottom: 14px; }
-.rail-title { margin: 0 0 4px; font-size: 1.05rem; font-weight: 700;
+/* ===== Best-deals section (full-width, below the main interface) ===== */
+.deals-section { padding-top: 8px; padding-bottom: 48px; }
+.rail-head { margin-bottom: 16px; }
+.rail-title { margin: 0 0 4px; font-size: 1.2rem; font-weight: 700;
   color: #7dd3fc; }
-.rail-sub { margin: 0; font-size: .78rem; color: var(--muted); }
-.rail-status { margin: 8px 0 0; font-size: .74rem; color: var(--muted); }
-.deal-cards { display: flex; flex-direction: column; gap: 12px; }
+.rail-sub { margin: 0; font-size: .82rem; color: var(--muted); }
+.rail-status { margin: 8px 0 0; font-size: .76rem; color: var(--muted); }
+.deal-cards { display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
 
 .deal-card { position: relative; display: block; text-decoration: none; color: var(--text);
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
@@ -236,16 +224,8 @@ fieldset { border: none; margin: 0; padding: 0; }
   background-size: 200% 100%; animation: shimmer 1.3s infinite; }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 
-/* Collapse rails below the centered app on narrower screens. */
-@media (max-width: 1340px) {
-  .app-shell { grid-template-columns: 1fr; grid-template-areas: "center" "left" "right"; }
-  .deal-rail { position: static; max-width: var(--maxw); margin: 0 auto; padding-top: 10px; }
-  .deal-rail-right { padding-top: 0; }
-  .deal-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
-}
 @media (max-width: 520px) {
   .deal-cards { grid-template-columns: 1fr; }
-  .app-shell { padding: 0 12px; }
 }
 
 .hidden { display: none !important; }
