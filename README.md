@@ -11,6 +11,12 @@ pricing baseline — and can optionally fetch **live** recertified-drive pricing
 from [ServerPartDeals](https://serverpartdeals.com) when a web fetcher is
 available.
 
+<table><tr>
+<td><img src=".github/donate-bitcoin-qr.png" width="96" alt="Bitcoin donation QR code"></td>
+<td><sub>💛 If you find this project useful, I'd be grateful for any donation. Thank you!<br>
+<b>Bitcoin:</b> <code>bc1qu6dkcchurnutgc40y6n53s3zm588z9nnkm2ygq</code></sub></td>
+</tr></table>
+
 ---
 
 ## Table of Contents
