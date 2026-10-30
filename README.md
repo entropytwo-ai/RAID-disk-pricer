@@ -26,8 +26,8 @@ available.
 - [Features](#features)
 - [Installation](#installation)
   - [Zero-dependency quick run](#zero-dependency-quick-run)
-  - [Optional live pricing (venv)](#optional-live-pricing-venv)
-  - [Install as a command](#install-as-a-command)
+  - [Install on Linux (single file, with live scraping)](#install-on-linux-single-file-with-live-scraping)
+  - [Install as a command (from the repo)](#install-as-a-command-from-the-repo)
 - [Usage](#usage)
   - [Planning modes](#planning-modes)
   - [All options](#all-options)
@@ -158,27 +158,100 @@ network access, the stdlib `urllib` fetcher may still retrieve live pricing).
 
 [↑ back to contents](#table-of-contents)
 
-### Optional live pricing (venv)
+### Install on Linux (single file, with live scraping)
 
-For the most reliable live pricing (Cloudflare bypass), install `cloudscraper`
-into a virtualenv:
+This installs **just the one `raid_architect.py` file** onto your machine as a
+`raid-architect` command, together with a dedicated virtualenv that carries the
+live-pricing fetchers (`cloudscraper` + `requests`). **Live ServerPartDeals
+pricing is the default** once installed — no flag needed.
+
+Why a venv? Modern Linux distros (Debian/Ubuntu 24.04+, Fedora, Arch) mark the
+system Python as *externally managed* (PEP 668), so a plain `pip install
+cloudscraper` is refused. A private venv sidesteps that cleanly and never touches
+your system packages.
+
+**Per-user install (no `sudo`), copy-paste the whole block:**
 
 ```bash
-python3 -m venv ~/raid-env
-source ~/raid-env/bin/activate
-pip install -r requirements.txt     # or: pip install cloudscraper
-python3 raid_architect.py --size 22TB --level 6 --capacity 100TB --compare
+set -e
+APP_DIR="$HOME/.local/share/raid-architect"
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$APP_DIR" "$BIN_DIR"
+
+# 1. fetch the single-file CLI
+curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/RAID-disk-pricer/main/raid_architect.py \
+  -o "$APP_DIR/raid_architect.py"
+
+# 2. dedicated venv with the live-pricing fetchers (Cloudflare bypass)
+python3 -m venv "$APP_DIR/venv"
+"$APP_DIR/venv/bin/pip" install --quiet --upgrade pip
+"$APP_DIR/venv/bin/pip" install --quiet cloudscraper requests
+
+# 3. launcher on your PATH that always uses that venv
+cat > "$BIN_DIR/raid-architect" <<EOF
+#!/usr/bin/env bash
+exec "$APP_DIR/venv/bin/python3" "$APP_DIR/raid_architect.py" "\$@"
+EOF
+chmod +x "$BIN_DIR/raid-architect"
+
+echo "Installed. Make sure $BIN_DIR is on your PATH."
 ```
+
+If `~/.local/bin` isn't already on your `PATH`, add it (bash **and** zsh):
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+Then run it from anywhere — live pricing by default:
+
+```bash
+raid-architect --size 22TB --level 6 --capacity 100TB          # live pricing (default)
+raid-architect --size 22TB --level 6 --capacity 100TB --compare  # baseline vs live
+```
+
+**System-wide install (all users, needs `sudo`):** use `/opt` for the app and
+`/usr/local/bin` for the launcher instead:
+
+```bash
+sudo mkdir -p /opt/raid-architect
+sudo curl -fsSL https://raw.githubusercontent.com/entropytwo-ai/RAID-disk-pricer/main/raid_architect.py \
+  -o /opt/raid-architect/raid_architect.py
+sudo python3 -m venv /opt/raid-architect/venv
+sudo /opt/raid-architect/venv/bin/pip install --quiet --upgrade pip
+sudo /opt/raid-architect/venv/bin/pip install --quiet cloudscraper requests
+sudo tee /usr/local/bin/raid-architect >/dev/null <<'EOF'
+#!/usr/bin/env bash
+exec /opt/raid-architect/venv/bin/python3 /opt/raid-architect/raid_architect.py "$@"
+EOF
+sudo chmod +x /usr/local/bin/raid-architect
+```
+
+**Update later:** re-run the `curl … -o …/raid_architect.py` step to pull the
+newest script; the venv is unaffected. **Uninstall:** remove the launcher and the
+app dir (`rm -f ~/.local/bin/raid-architect && rm -rf ~/.local/share/raid-architect`,
+or the `/opt` + `/usr/local/bin` paths for a system-wide install).
+
+> **No network / air-gapped?** The install still works — skip step 2 (the venv)
+> and point the launcher at plain `python3`. The CLI runs with zero dependencies
+> and uses the built-in static baseline when it can't reach the network.
 
 [↑ back to contents](#table-of-contents)
 
-### Install as a command
+### Install as a command (from the repo)
 
-Install the console script (`raid-architect` / `raid-pricer`) via `pip`:
+If you've cloned the repo, install the console scripts (`raid-architect` /
+`raid-pricer`) via `pip` instead — ideally with [`pipx`](https://pipx.pypa.io)
+so it lands in its own isolated environment on modern Linux:
 
 ```bash
+pipx install ".[live]"        # isolated install + live-pricing fetchers (recommended)
+
+# ...or, inside an activated virtualenv:
 pip install .                 # core tool, zero runtime deps
 pip install ".[live]"         # + live-pricing fetchers (cloudscraper, requests)
+
 raid-architect --size 22TB --level 6 --capacity 100TB
 ```
 
