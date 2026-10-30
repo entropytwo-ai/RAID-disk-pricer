@@ -41,8 +41,7 @@ body {
 .brand { display: flex; align-items: center; gap: 14px; }
 .brand-mark { font-size: 2rem; filter: drop-shadow(0 2px 6px rgba(56,189,248,.4)); }
 .brand h1 { margin: 0; font-size: 1.4rem; letter-spacing: .3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  -webkit-background-clip: text; background-clip: text; color: transparent; }
+  color: #7dd3fc; }
 .tagline { margin: 2px 0 0; font-size: .82rem; color: var(--muted); }
 .gh-link { color: var(--muted); text-decoration: none; font-size: .9rem; border: 1px solid var(--border);
   padding: 7px 12px; border-radius: 10px; transition: .15s; white-space: nowrap; }
@@ -195,9 +194,8 @@ fieldset { border: none; margin: 0; padding: 0; }
 .deal-rail { justify-self: center; width: 100%; max-width: 300px;
   padding-top: 28px; position: sticky; top: 82px; }
 .rail-head { margin-bottom: 14px; }
-.rail-title { margin: 0 0 4px; font-size: 1.05rem;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  -webkit-background-clip: text; background-clip: text; color: transparent; }
+.rail-title { margin: 0 0 4px; font-size: 1.05rem; font-weight: 700;
+  color: #7dd3fc; }
 .rail-sub { margin: 0; font-size: .78rem; color: var(--muted); }
 .rail-status { margin: 8px 0 0; font-size: .74rem; color: var(--muted); }
 .deal-cards { display: flex; flex-direction: column; gap: 12px; }
