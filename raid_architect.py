@@ -29,6 +29,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass, field, asdict
 from statistics import median
@@ -100,6 +101,26 @@ SPD_PRODUCTS_URL = (
     "https://serverpartdeals.com/collections/"
     "manufacturer-recertified-drives/products.json?limit=250"
 )
+
+#: Retailers with structured, polite-to-fetch Shopify ``products.json`` feeds,
+#: used by the "best deals" scraper. Each source is fetched ONCE per run and
+#: guarded independently — one failing feed never breaks the others. Keep this
+#: list small to be a good citizen on the shared outbound IP.
+DEAL_SOURCES: list[dict] = [
+    {
+        "name": "ServerPartDeals",
+        "url": ("https://serverpartdeals.com/collections/"
+                "manufacturer-recertified-drives/products.json?limit=250"),
+        "base": "https://serverpartdeals.com",
+        "default_condition": "Recertified",
+    },
+    {
+        "name": "Water Panther",
+        "url": "https://waterpanther.com/products.json?limit=250",
+        "base": "https://waterpanther.com",
+        "default_condition": None,
+    },
+]
 
 #: Multipliers to translate TB-like units into TB.
 UNIT_TO_TB: dict[str, float] = {
@@ -857,6 +878,323 @@ def build_json(layout: RaidLayout, pricing: PricingResult) -> dict:
 
 
 # ===========================================================================
+# Best hard-drive deals scraper.
+#
+# Reuses the SAME multi-stage fetcher (_fetch_products_json: cloudscraper ->
+# requests -> urllib), User-Agent, timeouts and graceful degradation as the
+# live-pricing path. Each retailer feed is fetched once per run, cached, and
+# guarded independently so one failing source never breaks the others.
+# ===========================================================================
+
+
+@dataclass
+class DealListing:
+    """A single parsed drive listing, ranked by $/TB (lower is better value)."""
+
+    title: str
+    capacity_tb: float
+    price: float
+    price_per_tb: float
+    condition: str          # Recertified / New / NAS / Enterprise / Unknown
+    retailer: str
+    url: str
+
+    def to_dict(self) -> dict:
+        return {
+            "title": self.title,
+            "capacity_tb": self.capacity_tb,
+            "price": round(self.price, 2),
+            "price_per_tb": round(self.price_per_tb, 4),
+            "condition": self.condition,
+            "retailer": self.retailer,
+            "url": self.url,
+        }
+
+
+@dataclass
+class SourceStatus:
+    """Per-retailer fetch outcome, surfaced so the UI/CLI can note failures."""
+
+    name: str
+    ok: bool
+    count: int = 0
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "ok": self.ok, "count": self.count}
+
+
+@dataclass
+class DealsResult:
+    """Ranked deals plus the status of each source they were drawn from."""
+
+    deals: list[DealListing] = field(default_factory=list)
+    sources: list[SourceStatus] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "version": __version__,
+            "count": len(self.deals),
+            "any_source_ok": any(s.ok for s in self.sources),
+            "sources": [s.to_dict() for s in self.sources],
+            "deals": [d.to_dict() for d in self.deals],
+        }
+
+
+#: Capacity like "22TB", "22 TB", "20tb" — captures the numeric TB value.
+_CAPACITY_RE = re.compile(r"(\d+(?:\.\d+)?)\s*TB\b", re.IGNORECASE)
+
+#: In-run cache of (all parsed deals, source statuses) so filters are cheap and
+#: the network is hit at most once per process.
+_DEALS_CACHE: Optional[tuple[list[DealListing], list[SourceStatus]]] = None
+
+_CONDITION_ALIASES: dict[str, str] = {
+    "recert": "recertified", "recertified": "recertified",
+    "refurb": "recertified", "refurbished": "recertified", "renewed": "recertified",
+    "new": "new", "nas": "nas", "enterprise": "enterprise", "ent": "enterprise",
+}
+
+
+def parse_capacity_tb(title: str) -> Optional[float]:
+    """Robustly parse a single-drive capacity in TB from a product title.
+
+    Returns ``None`` when no sane single-drive TB value is present. Values above
+    100 TB are rejected as implausible for one drive (likely a bundle/typo).
+    """
+    if not title:
+        return None
+    m = _CAPACITY_RE.search(title)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    if val <= 0 or val > 100:
+        return None
+    return val
+
+
+def _is_multipack(title: str) -> bool:
+    """Heuristic: skip bundles / multi-packs (their $/TB would be misleading)."""
+    t = title.lower()
+    return ("-pack" in t or " pack" in t or "pack of" in t
+            or "bundle" in t or " 2x" in t or " 4x" in t)
+
+
+def infer_condition(title: str, default: Optional[str] = None) -> str:
+    """Infer a drive's condition/tier from title keywords."""
+    t = title.lower()
+    if any(k in t for k in ("recertified", "recert", "refurbished", "refurb", "renewed")):
+        return "Recertified"
+    if "enterprise" in t:
+        return "Enterprise"
+    if "nas" in t:
+        return "NAS"
+    if "new" in t:
+        return "New"
+    return default or "Unknown"
+
+
+def _product_price(product: dict) -> Optional[float]:
+    """Return the cheapest available variant price (>0), or None."""
+    available: list[float] = []
+    any_price: list[float] = []
+    for variant in product.get("variants", []):
+        try:
+            price = float(variant.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        any_price.append(price)
+        if variant.get("available", True):
+            available.append(price)
+    pool = available or any_price
+    return min(pool) if pool else None
+
+
+def _parse_deals_from_products(data: dict, src: dict) -> list[DealListing]:
+    """Parse a Shopify products.json payload into :class:`DealListing` rows."""
+    if not isinstance(data, dict):
+        return []
+    base = src.get("base", "").rstrip("/")
+    default_cond = src.get("default_condition")
+    out: list[DealListing] = []
+    for product in data.get("products", []):
+        title = str(product.get("title", "")).strip()
+        if not title or _is_multipack(title):
+            continue
+        cap = parse_capacity_tb(title)
+        if cap is None:
+            continue
+        price = _product_price(product)
+        if price is None:
+            continue
+        handle = product.get("handle")
+        url = f"{base}/products/{handle}" if (base and handle) else (base or "")
+        out.append(DealListing(
+            title=title,
+            capacity_tb=cap,
+            price=price,
+            price_per_tb=price / cap,
+            condition=infer_condition(title, default_cond),
+            retailer=src.get("name", "?"),
+            url=url,
+        ))
+    return out
+
+
+def _fetch_all_deals(timeout: int = 12,
+                     verbose: bool = False) -> tuple[list[DealListing], list[SourceStatus]]:
+    """Fetch & parse every configured source once; cache for the run.
+
+    Never raises: a source that errors, times out, or returns malformed data is
+    recorded as ``ok=False`` and simply contributes no listings.
+    """
+    global _DEALS_CACHE
+    if _DEALS_CACHE is not None:
+        return _DEALS_CACHE
+
+    all_deals: list[DealListing] = []
+    statuses: list[SourceStatus] = []
+    for src in DEAL_SOURCES:
+        name = src.get("name", "?")
+        try:
+            data = _fetch_products_json(src["url"], timeout=timeout)
+            if not isinstance(data, dict):
+                statuses.append(SourceStatus(name, False, 0))
+                if verbose:
+                    print(f"  deals: {name} unavailable.", file=sys.stderr)
+                continue
+            parsed = _parse_deals_from_products(data, src)
+            all_deals.extend(parsed)
+            statuses.append(SourceStatus(name, True, len(parsed)))
+        except Exception:  # pragma: no cover - defensive; never crash
+            statuses.append(SourceStatus(name, False, 0))
+            if verbose:
+                print(f"  deals: {name} errored.", file=sys.stderr)
+
+    _DEALS_CACHE = (all_deals, statuses)
+    return _DEALS_CACHE
+
+
+def reset_deals_cache() -> None:
+    """Clear the in-run deals cache (used by tests)."""
+    global _DEALS_CACHE
+    _DEALS_CACHE = None
+
+
+def _normalize_condition_filter(condition: Optional[str]) -> Optional[str]:
+    if not condition:
+        return None
+    key = str(condition).strip().lower()
+    return _CONDITION_ALIASES.get(key, key)
+
+
+def get_deals(min_tb: Optional[float] = None, max_tb: Optional[float] = None,
+              limit: Optional[int] = 12, condition: Optional[str] = None,
+              timeout: int = 12, verbose: bool = False) -> DealsResult:
+    """Return ranked deals (best $/TB first) plus per-source status.
+
+    Filters by capacity range and/or condition, de-duplicates obvious repeats,
+    and sorts ascending by $/TB. Degrades to an empty result (never raises) when
+    nothing is fetchable.
+    """
+    all_deals, statuses = _fetch_all_deals(timeout=timeout, verbose=verbose)
+    cond = _normalize_condition_filter(condition)
+
+    filtered: list[DealListing] = []
+    seen: set = set()
+    for d in all_deals:
+        if min_tb is not None and d.capacity_tb < min_tb - 1e-9:
+            continue
+        if max_tb is not None and d.capacity_tb > max_tb + 1e-9:
+            continue
+        if cond is not None and d.condition.lower() != cond:
+            continue
+        key = (d.retailer, d.title.lower(), round(d.price, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append(d)
+
+    filtered.sort(key=lambda d: d.price_per_tb)
+    if limit is not None and limit > 0:
+        filtered = filtered[:limit]
+    return DealsResult(deals=filtered, sources=statuses)
+
+
+def get_best_deals(min_tb: Optional[float] = None, max_tb: Optional[float] = None,
+                   limit: Optional[int] = 12, condition: Optional[str] = None,
+                   timeout: int = 12) -> list[DealListing]:
+    """Convenience wrapper returning just the ranked list of deals."""
+    return get_deals(min_tb=min_tb, max_tb=max_tb, limit=limit,
+                     condition=condition, timeout=timeout).deals
+
+
+def _truncate(text: str, width: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[: width - 1].rstrip() + "…"
+
+
+def render_deals(result: DealsResult, st: Style) -> str:
+    """Render a beautiful, ranked deals table (OSC 8 links, colour-aware)."""
+    lines: list[str] = []
+    lines.append(st.paint("═" * 74, st.CYAN))
+    lines.append(st.paint(" Best hard-drive deals — ranked by $/TB ".center(74),
+                          st.BOLD, st.CYAN))
+    lines.append(st.paint("═" * 74, st.CYAN))
+
+    if result.sources:
+        src_bits = ", ".join(f"{s.name} ({s.count})" if s.ok else f"{s.name} ✗"
+                             for s in result.sources)
+        lines.append(st.paint(f"  Sources: {src_bits}", st.DIM))
+    failed = [s.name for s in result.sources if not s.ok]
+    if failed:
+        lines.append(st.paint(f"  Unavailable right now: {', '.join(failed)}", st.YELLOW))
+    lines.append("")
+
+    if not result.deals:
+        lines.append(st.paint("  No live deals available right now.", st.YELLOW, st.BOLD))
+        lines.append(st.paint("  (Retailer feeds may be unreachable, or nothing matched "
+                              "your filters.)", st.DIM))
+        return "\n".join(lines)
+
+    header = (f"  {'#':<4}{'$/TB':>9}{'Price':>11}{'Cap':>8}  "
+              f"{'Condition':<13}{'Retailer':<16}")
+    lines.append(st.paint(header, st.BOLD))
+    lines.append("  " + st.paint("─" * 70, st.DIM))
+    for i, d in enumerate(result.deals, 1):
+        row = (f"  {('#' + str(i)):<4}"
+               + st.paint(f"{fmt_money(d.price_per_tb):>9}", st.GREEN, st.BOLD)
+               + f"{fmt_money(d.price):>11}{fmt_tb(d.capacity_tb):>8}  "
+               + f"{d.condition:<13}{d.retailer:<16}")
+        lines.append(row)
+        lines.append("      " + st.paint(st.link(_truncate(d.title, 60), d.url), st.DIM))
+    lines.append("")
+    lines.append(st.paint("  Prices move constantly — verify on the retailer's site "
+                          "before buying.", st.DIM))
+    return "\n".join(lines)
+
+
+def render_deals_footer(size_tb: float, st: Style, timeout: int = 12,
+                        n: int = 3) -> str:
+    """Short 'top deals near <size>' footer for a normal plan (opt-in)."""
+    lo, hi = size_tb * 0.85, size_tb * 1.15
+    result = get_deals(min_tb=lo, max_tb=hi, limit=n, timeout=timeout)
+    if not result.deals:
+        return ""
+    lines = [st.paint(f"Top deals near {fmt_tb(size_tb)} (by $/TB)", st.BOLD, st.WHITE)]
+    for i, d in enumerate(result.deals, 1):
+        lines.append("  "
+                     + st.paint(f"#{i} {fmt_money(d.price_per_tb)}/TB", st.GREEN, st.BOLD)
+                     + f"  {fmt_tb(d.capacity_tb)}  {fmt_money(d.price)}  "
+                     + f"{d.condition}  {d.retailer}")
+        lines.append("     " + st.paint(st.link(_truncate(d.title, 56), d.url), st.DIM))
+    return "\n".join(lines)
+
+
+# ===========================================================================
 # Dependency help banner.
 # ===========================================================================
 
@@ -915,8 +1253,9 @@ def build_parser() -> argparse.ArgumentParser:
                    version=f"raid_architect.py {__version__}")
 
     g_layout = p.add_argument_group("array")
-    g_layout.add_argument("-s", "--size", required=True,
-                          help="Per-drive size, e.g. 22TB, 20, 500GB, 2PB.")
+    g_layout.add_argument("-s", "--size",
+                          help="Per-drive size, e.g. 22TB, 20, 500GB, 2PB. "
+                               "(Required for planning; not needed for --deals.)")
     g_layout.add_argument("-l", "--level",
                           help="RAID level: 0, 1, 5, 6, 10, 50, 60.")
     g_layout.add_argument("-f", "--fault", type=int,
@@ -961,7 +1300,46 @@ def build_parser() -> argparse.ArgumentParser:
     g_out.add_argument("--timeout", type=int, default=12,
                        help="Live-pricing network timeout in seconds (default: 12).")
 
+    g_deals = p.add_argument_group("best deals")
+    g_deals.add_argument("--deals", action="store_true",
+                         help="Show the best current hard-drive deals "
+                              "(ranked by $/TB) and exit.")
+    g_deals.add_argument("--deals-size", metavar="TB",
+                         help="Only deals at this exact capacity, e.g. 22TB.")
+    g_deals.add_argument("--deals-min", metavar="TB",
+                         help="Minimum capacity for deals, e.g. 16TB.")
+    g_deals.add_argument("--deals-max", metavar="TB",
+                         help="Maximum capacity for deals, e.g. 24TB.")
+    g_deals.add_argument("--deals-limit", type=int, default=12, metavar="N",
+                         help="Max number of deals to show (default: 12).")
+    g_deals.add_argument("--deals-condition", metavar="COND",
+                         help="Filter deals by condition: recertified, new, "
+                              "nas, enterprise.")
+    g_deals.add_argument("--with-deals", action="store_true",
+                         help="Append a short 'top deals near <size>' footer to "
+                              "a normal (non-JSON) plan.")
+
     return p
+
+
+def _run_deals(args, st: Style, stdout) -> int:
+    """Handle the ``--deals`` view (ranked best hard-drive deals)."""
+    if args.deals_size:
+        sz = parse_size(args.deals_size)
+        min_tb = max_tb = sz
+    else:
+        min_tb = parse_size(args.deals_min) if args.deals_min else None
+        max_tb = parse_size(args.deals_max) if args.deals_max else None
+    result = get_deals(
+        min_tb=min_tb, max_tb=max_tb, limit=args.deals_limit,
+        condition=args.deals_condition, timeout=args.timeout,
+        verbose=not args.json,
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2), file=stdout)
+    else:
+        print(render_deals(result, st), file=stdout)
+    return 0
 
 
 def _select_level(args) -> str:
@@ -985,6 +1363,15 @@ def run(argv: Optional[list[str]] = None, *,
     st = resolve_style(stdout, force_color=False if args.json else force_color)
 
     try:
+        # ---- Best deals view (no planning inputs required) ----------------
+        if args.deals:
+            return _run_deals(args, st, stdout)
+
+        if args.size is None:
+            raise RaidPricerError(
+                "A per-drive --size is required (e.g. 22TB). "
+                "Tip: use --deals to browse the best current drive deals."
+            )
         size_tb = parse_size(args.size)
 
         if args.capacity is None and args.drives is None:
@@ -1059,6 +1446,10 @@ def run(argv: Optional[list[str]] = None, *,
                       file=stderr)
                 print("", file=stdout)
             print(render_report(layout, pricing, st), file=stdout)
+            if args.with_deals:
+                footer = render_deals_footer(size_tb, st, timeout=args.timeout)
+                if footer:
+                    print("\n" + footer, file=stdout)
         return 0
 
     except RaidPricerError as exc:

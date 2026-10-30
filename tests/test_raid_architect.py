@@ -371,5 +371,230 @@ class TestWebComparison(unittest.TestCase):
         self.assertIn("live", cmp)
 
 
+class TestDealsParsing(unittest.TestCase):
+    """Pure helpers: capacity parsing, condition inference, multipack skip."""
+
+    def test_parse_capacity_varied(self):
+        self.assertEqual(ra.parse_capacity_tb("Seagate 22TB Exos"), 22.0)
+        self.assertEqual(ra.parse_capacity_tb("WD 22 TB Recertified"), 22.0)
+        self.assertEqual(ra.parse_capacity_tb("Toshiba 20tb NAS"), 20.0)
+        self.assertEqual(ra.parse_capacity_tb("HGST 18.0 TB"), 18.0)
+
+    def test_parse_capacity_rejects(self):
+        self.assertIsNone(ra.parse_capacity_tb("Seagate 512GB SSD"))
+        self.assertIsNone(ra.parse_capacity_tb("No capacity here"))
+        self.assertIsNone(ra.parse_capacity_tb(""))
+        self.assertIsNone(ra.parse_capacity_tb("Bogus 250TB bundle"))  # >100 rejected
+
+    def test_infer_condition(self):
+        self.assertEqual(ra.infer_condition("WD 22TB Recertified"), "Recertified")
+        self.assertEqual(ra.infer_condition("WD 22TB Renewed"), "Recertified")
+        self.assertEqual(ra.infer_condition("WD 22TB Refurbished"), "Recertified")
+        self.assertEqual(ra.infer_condition("Seagate Exos 20TB Enterprise"), "Enterprise")
+        self.assertEqual(ra.infer_condition("WD Red 18TB NAS"), "NAS")
+        self.assertEqual(ra.infer_condition("Seagate 16TB New"), "New")
+        self.assertEqual(ra.infer_condition("Seagate 16TB", default="Recertified"),
+                         "Recertified")
+        self.assertEqual(ra.infer_condition("Seagate 16TB"), "Unknown")
+
+    def test_is_multipack(self):
+        self.assertTrue(ra._is_multipack("Seagate 8TB 2-pack"))
+        self.assertTrue(ra._is_multipack("WD 10TB bundle"))
+        self.assertTrue(ra._is_multipack("HGST 12TB 2x drives"))
+        self.assertFalse(ra._is_multipack("Seagate 22TB Exos"))
+
+    def test_product_price_cheapest_available(self):
+        prod = {"variants": [
+            {"price": "330.00", "available": True},
+            {"price": "320.00", "available": True},
+            {"price": "300.00", "available": False},
+        ]}
+        self.assertAlmostEqual(ra._product_price(prod), 320.0)
+
+    def test_product_price_falls_back_to_unavailable(self):
+        prod = {"variants": [{"price": "300.00", "available": False}]}
+        self.assertAlmostEqual(ra._product_price(prod), 300.0)
+
+    def test_product_price_none_when_no_price(self):
+        self.assertIsNone(ra._product_price({"variants": [{"price": "0"}]}))
+        self.assertIsNone(ra._product_price({"variants": []}))
+
+
+class TestDeals(unittest.TestCase):
+    """Deals ranking, filtering, dedupe and graceful-empty via mocked network."""
+
+    # Per-source Shopify-style fixtures keyed by a substring of the feed URL.
+    SPD = {"products": [
+        {"title": "Seagate 14TB Recertified", "handle": "spd-14",
+         "variants": [{"price": "140.00", "available": True}]},   # $10.00/TB
+        {"title": "WD 22TB Recertified", "handle": "spd-22",
+         "variants": [{"price": "300.00", "available": True}]},   # $13.64/TB
+        {"title": "Seagate 8TB 2-pack Recertified", "handle": "spd-8x2",
+         "variants": [{"price": "120.00", "available": True}]},   # multipack -> skip
+        {"title": "Samsung 512GB SSD", "handle": "spd-ssd",
+         "variants": [{"price": "40.00", "available": True}]},    # no TB -> skip
+    ]}
+    GHD = {"products": [
+        {"title": "HGST 18TB Enterprise", "handle": "ghd-18",
+         "variants": [{"price": "279.00", "available": True}]},   # $15.50/TB
+        {"title": "WD 22TB New", "handle": "ghd-22",
+         "variants": [{"price": "330.00", "available": False},
+                      {"price": "320.00", "available": True}]},   # $14.55/TB
+    ]}
+
+    def _fake_fetch(self, url, timeout=12):
+        if "serverpartdeals" in url:
+            return self.SPD
+        if "waterpanther" in url:
+            return self.GHD
+        return None
+
+    def setUp(self):
+        ra.reset_deals_cache()
+        self._orig = ra._fetch_products_json
+        ra._fetch_products_json = self._fake_fetch
+
+    def tearDown(self):
+        ra._fetch_products_json = self._orig
+        ra.reset_deals_cache()
+
+    def test_ranking_ascending_by_price_per_tb(self):
+        result = ra.get_deals()
+        ppt = [round(d.price_per_tb, 2) for d in result.deals]
+        self.assertEqual(ppt, sorted(ppt))
+        # Best deal is the 14TB @ $140 = $10/TB, from ServerPartDeals.
+        self.assertEqual(result.deals[0].capacity_tb, 14.0)
+        self.assertAlmostEqual(result.deals[0].price_per_tb, 10.0)
+        self.assertEqual(result.deals[0].retailer, "ServerPartDeals")
+
+    def test_multipack_and_non_tb_skipped(self):
+        titles = [d.title for d in ra.get_deals().deals]
+        self.assertNotIn("Seagate 8TB 2-pack Recertified", titles)
+        self.assertNotIn("Samsung 512GB SSD", titles)
+        self.assertEqual(len(titles), 4)  # 2 SPD + 2 GHD
+
+    def test_cheapest_available_variant_used(self):
+        wd = next(d for d in ra.get_deals().deals if d.title == "WD 22TB New")
+        self.assertAlmostEqual(wd.price, 320.0)
+
+    def test_condition_inference_from_source(self):
+        by_title = {d.title: d for d in ra.get_deals().deals}
+        self.assertEqual(by_title["WD 22TB Recertified"].condition, "Recertified")
+        self.assertEqual(by_title["WD 22TB New"].condition, "New")
+        self.assertEqual(by_title["HGST 18TB Enterprise"].condition, "Enterprise")
+
+    def test_capacity_filter(self):
+        result = ra.get_deals(min_tb=18.0, max_tb=22.0)
+        caps = sorted({d.capacity_tb for d in result.deals})
+        self.assertEqual(caps, [18.0, 22.0])
+        self.assertTrue(all(18.0 <= d.capacity_tb <= 22.0 for d in result.deals))
+
+    def test_condition_filter(self):
+        result = ra.get_deals(condition="recertified")
+        self.assertTrue(result.deals)
+        self.assertTrue(all(d.condition == "Recertified" for d in result.deals))
+
+    def test_limit(self):
+        self.assertEqual(len(ra.get_deals(limit=2).deals), 2)
+
+    def test_dedupe(self):
+        # Two identical SPD listings collapse to one.
+        dup = {"products": self.SPD["products"] + [self.SPD["products"][0]]}
+        ra._fetch_products_json = lambda url, timeout=12: (
+            dup if "serverpartdeals" in url else self.GHD)
+        ra.reset_deals_cache()
+        titles = [d.title for d in ra.get_deals().deals]
+        self.assertEqual(titles.count("Seagate 14TB Recertified"), 1)
+
+    def test_source_status_reported(self):
+        result = ra.get_deals()
+        status = {s.name: s for s in result.sources}
+        self.assertTrue(status["ServerPartDeals"].ok)
+        self.assertTrue(status["Water Panther"].ok)
+        self.assertEqual(status["ServerPartDeals"].count, 2)
+
+    def test_graceful_empty_when_sources_unavailable(self):
+        ra._fetch_products_json = lambda url, timeout=12: None
+        ra.reset_deals_cache()
+        result = ra.get_deals()
+        self.assertEqual(result.deals, [])
+        d = result.to_dict()
+        self.assertEqual(d["count"], 0)
+        self.assertFalse(d["any_source_ok"])
+        self.assertTrue(all(not s["ok"] for s in d["sources"]))
+
+    def test_never_raises_on_bad_payload(self):
+        ra._fetch_products_json = lambda url, timeout=12: {"garbage": True}
+        ra.reset_deals_cache()
+        result = ra.get_deals()
+        self.assertEqual(result.deals, [])
+        self.assertTrue(all(s.ok for s in result.sources))  # dict ok, just no products
+
+    def test_to_dict_shape(self):
+        d = ra.get_deals(limit=1).to_dict()
+        self.assertEqual(set(d.keys()),
+                         {"version", "count", "any_source_ok", "sources", "deals"})
+        deal = d["deals"][0]
+        self.assertEqual(set(deal.keys()),
+                         {"title", "capacity_tb", "price", "price_per_tb",
+                          "condition", "retailer", "url"})
+
+    def test_get_best_deals_wrapper(self):
+        deals = ra.get_best_deals(limit=3)
+        self.assertIsInstance(deals, list)
+        self.assertLessEqual(len(deals), 3)
+        self.assertIsInstance(deals[0], ra.DealListing)
+
+
+class TestDealsWeb(unittest.TestCase):
+    """/api/deals endpoint over mocked network."""
+
+    def _fake_fetch(self, url, timeout=12):
+        if "serverpartdeals" in url:
+            return TestDeals.SPD
+        if "waterpanther" in url:
+            return TestDeals.GHD
+        return None
+
+    def setUp(self):
+        self.client = webapp.app.test_client()
+        ra.reset_deals_cache()
+        self._orig = ra._fetch_products_json
+        ra._fetch_products_json = self._fake_fetch
+
+    def tearDown(self):
+        ra._fetch_products_json = self._orig
+        ra.reset_deals_cache()
+
+    def test_api_deals_returns_ranked_json(self):
+        resp = self.client.get("/api/deals?limit=5")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("max-age", resp.headers.get("Cache-Control", ""))
+        payload = resp.get_json()
+        self.assertIn("deals", payload)
+        self.assertIn("sources", payload)
+        self.assertIn("count", payload)
+        self.assertTrue(payload["any_source_ok"])
+        ppt = [d["price_per_tb"] for d in payload["deals"]]
+        self.assertEqual(ppt, sorted(ppt))
+
+    def test_api_deals_filters(self):
+        resp = self.client.get("/api/deals?min=18TB&max=22TB&condition=recertified")
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.get_json()
+        for d in payload["deals"]:
+            self.assertEqual(d["condition"], "Recertified")
+            self.assertTrue(18.0 <= d["capacity_tb"] <= 22.0)
+
+    def test_api_deals_graceful_empty(self):
+        ra._fetch_products_json = lambda url, timeout=12: None
+        ra.reset_deals_cache()
+        resp = self.client.get("/api/deals")
+        self.assertEqual(resp.status_code, 200)  # not a 500
+        payload = resp.get_json()
+        self.assertEqual(payload["count"], 0)
+        self.assertFalse(payload["any_source_ok"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

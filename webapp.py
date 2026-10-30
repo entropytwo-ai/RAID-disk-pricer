@@ -348,6 +348,47 @@ def api_compare():
         return jsonify({"error": f"Unexpected error: {exc}"}), 500
 
 
+@app.route("/api/deals", methods=["GET", "POST"])
+def api_deals():
+    """Return the best current hard-drive deals (ranked by $/TB) + source status.
+
+    Accepts optional filters via query string (GET) or JSON/form body (POST):
+    ``size`` (exact capacity), ``min``/``max`` (capacity range), ``limit``,
+    ``condition``. Reuses ``raid_architect.get_deals`` so there is one source of
+    truth for fetching/parsing. Never 500s on an unreachable source — it returns
+    a clean empty result with per-source status instead.
+    """
+    try:
+        data = _get_payload() if request.method == "POST" else request.args.to_dict()
+
+        size_raw = data.get("size")
+        if size_raw not in (None, ""):
+            sz = ra.parse_size(str(size_raw))
+            min_tb = max_tb = sz
+        else:
+            min_raw = data.get("min")
+            max_raw = data.get("max")
+            min_tb = ra.parse_size(str(min_raw)) if min_raw not in (None, "") else None
+            max_tb = ra.parse_size(str(max_raw)) if max_raw not in (None, "") else None
+
+        limit = _opt_int(data, "limit") or 12
+        limit = max(1, min(limit, 50))  # keep payloads sane
+        condition = data.get("condition") or None
+
+        result = ra.get_deals(
+            min_tb=min_tb, max_tb=max_tb, limit=limit, condition=condition,
+        )
+        resp = jsonify(result.to_dict())
+        # Deals don't change second-to-second: let the browser/CDN cache briefly.
+        resp.headers["Cache-Control"] = "public, max-age=300"
+        return resp
+
+    except ra.RaidPricerError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover - defensive
+        return jsonify({"error": f"Unexpected error: {exc}"}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("RAID_WEB_PORT", "8137"))
     app.run(host="127.0.0.1", port=port, debug=False)

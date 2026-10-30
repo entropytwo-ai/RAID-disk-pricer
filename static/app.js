@@ -9,6 +9,8 @@ const TIER_CLASS = { Refurb: "dot-refurb", NAS: "dot-nas", Ent: "dot-ent" };
 let META = null; // /api/levels payload
 let LAST_COMPARISON = null; // comparison block from the most recent plan
 let CMP_METRIC = "total"; // which metric the Baseline|Live|Δ table shows
+let DEALS_LOADED = false; // whether the best-deals rails have been populated
+let LAST_PLAN_SIZE_TB = null; // drive size of the most recent plan (for highlighting)
 
 // ---- helpers --------------------------------------------------------------
 function money(v) {
@@ -34,6 +36,11 @@ function setStatus(kind, msg) {
   box.className = "status " + kind;
   box.textContent = msg;
   box.classList.remove("hidden");
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
 }
 
 // ---- form state -----------------------------------------------------------
@@ -95,6 +102,8 @@ async function postJSON(url, payload) {
 // ---- rendering: single plan ----------------------------------------------
 function renderPlan(data) {
   const L = data.layout;
+  LAST_PLAN_SIZE_TB = (L && typeof L.drive_size_tb === "number") ? L.drive_size_tb : null;
+  highlightDealsForSize(LAST_PLAN_SIZE_TB);
   $("compareResult").classList.add("hidden");
   $("planResult").classList.remove("hidden");
 
@@ -261,6 +270,96 @@ async function doCompare() {
   }
 }
 
+// ---- best-deals rails -----------------------------------------------------
+function condClass(c) {
+  const k = String(c || "").toLowerCase();
+  if (k.startsWith("recert")) return "recertified";
+  if (k === "new") return "new";
+  if (k === "nas") return "nas";
+  if (k === "enterprise") return "enterprise";
+  return "";
+}
+
+function dealCard(d, rank) {
+  const a = document.createElement("a");
+  a.className = "deal-card";
+  a.href = d.url || "#";
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.dataset.capacity = d.capacity_tb;
+  const ppt = "$" + Number(d.price_per_tb).toFixed(2);
+  const cond = d.condition || "Unknown";
+  a.innerHTML =
+    `<span class="deal-rank${rank <= 3 ? " top" : ""}">#${rank}</span>` +
+    `<div class="deal-ppt">${ppt}<small> / TB</small></div>` +
+    `<div class="deal-meta"><span class="deal-cap">${tb(d.capacity_tb)}</span>` +
+    `<span class="deal-price">${money(d.price)}</span></div>` +
+    `<div class="deal-title">${escapeHtml(d.title)}</div>` +
+    `<div class="deal-foot">` +
+    `<span class="deal-cond ${condClass(cond)}">${escapeHtml(cond)}</span>` +
+    `<span class="deal-retailer">${escapeHtml(d.retailer)} ↗</span></div>`;
+  return a;
+}
+
+function renderDealsEmpty(msg) {
+  $("dealCardsLeft").innerHTML = `<div class="rail-empty">${msg}</div>`;
+  $("dealCardsLeft").removeAttribute("aria-busy");
+  $("dealCardsRight").innerHTML = "";
+  $("dealRailRight").classList.add("hidden");
+}
+
+function renderDeals(result) {
+  const left = $("dealCardsLeft"), right = $("dealCardsRight");
+  left.innerHTML = ""; right.innerHTML = "";
+  left.removeAttribute("aria-busy");
+  const deals = (result && result.deals) || [];
+  const status = $("dealStatus");
+
+  if (!deals.length) {
+    const any = result && result.any_source_ok;
+    renderDealsEmpty(any
+      ? "No matching deals right now — try again later."
+      : "No live deals available right now. Retailer feeds are unreachable from here.");
+    status.textContent = any ? "No deals matched." : "Live deal sources unavailable.";
+    return;
+  }
+
+  const ok = (result.sources || []).filter((s) => s.ok).map((s) => s.name);
+  const bad = (result.sources || []).filter((s) => !s.ok).map((s) => s.name);
+  status.innerHTML = `Live from <strong>${escapeHtml(ok.join(", ") || "—")}</strong>`
+    + (bad.length ? ` · ${escapeHtml(bad.join(", "))} unavailable` : "");
+
+  const half = Math.ceil(deals.length / 2);
+  deals.forEach((d, i) => (i < half ? left : right).appendChild(dealCard(d, i + 1)));
+  $("dealRailRight").classList.toggle("hidden", right.children.length === 0);
+  highlightDealsForSize(LAST_PLAN_SIZE_TB);
+}
+
+function highlightDealsForSize(sizeTb) {
+  if (!sizeTb) return;
+  document.querySelectorAll(".deal-card").forEach((c) => {
+    const cap = parseFloat(c.dataset.capacity);
+    c.classList.toggle("match", Math.abs(cap - sizeTb) < 1e-6);
+  });
+}
+
+async function loadDeals() {
+  if (DEALS_LOADED) return;
+  const left = $("dealCardsLeft");
+  left.innerHTML = Array.from({ length: 4 })
+    .map(() => '<div class="deal-skeleton"></div>').join("");
+  try {
+    const res = await fetch("/api/deals?limit=12");
+    const data = await res.json();
+    if (data && data.error) throw new Error(data.error);
+    DEALS_LOADED = true;
+    renderDeals(data);
+  } catch (_) {
+    renderDealsEmpty("Couldn't load live deals right now.");
+    $("dealStatus").textContent = "Deals unavailable.";
+  }
+}
+
 // ---- init -----------------------------------------------------------------
 async function init() {
   document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", syncMode));
@@ -296,6 +395,7 @@ async function init() {
   syncLevel();
   syncSource();
   doPlan(); // show an initial result on load
+  loadDeals(); // fire-and-forget: populate the best-deals rails
 }
 
 document.addEventListener("DOMContentLoaded", init);

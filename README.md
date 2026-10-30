@@ -29,6 +29,7 @@ available.
   - [Sample output](#sample-output)
 - [RAID levels & tradeoffs](#raid-levels--tradeoffs)
 - [Pricing sources & disclaimer](#pricing-sources--disclaimer)
+- [Best hard-drive deals](#best-hard-drive-deals)
 - [JSON output](#json-output)
 - [Testing](#testing)
 - [Web app (self-hosting)](#web-app-self-hosting)
@@ -364,6 +365,128 @@ The pricing source used is always printed (`source: baseline | live | manual`).
 > reflects one retailer at one moment. **Always verify current prices before
 > purchasing.** This tool is for planning/estimation only and is not affiliated
 > with any retailer or manufacturer.
+
+[↑ back to contents](#table-of-contents)
+
+---
+
+## Best hard-drive deals
+
+Beyond pricing a *specific* plan, RAID Architect can surface the **best current
+hard-drive deals ranked by $/TB** — the single number that matters most when you
+are buying bulk storage. The same scraper powers the CLI, the JSON API and the
+web UI (one source of truth: all fetching/parsing/ranking lives in
+`raid_architect.py`).
+
+**Retailers scraped.** A deliberately small set of retailers that expose a
+structured, polite-to-fetch Shopify `products.json` feed (so we stay a good
+citizen on a shared IP — each feed is fetched **once per run**, cached, with a
+normal User-Agent and a sane timeout, and any unreachable source is skipped
+gracefully):
+
+| Retailer | Feed | Default condition |
+|----------|------|-------------------|
+| **ServerPartDeals** | `manufacturer-recertified-drives/products.json` | Recertified |
+| **Water Panther** | `products.json` | inferred from title |
+
+Each listing's title is parsed for a single-drive capacity (robust to `22TB`,
+`22 TB`, `20tb`, `18.0 TB`; implausible values >100 TB and obvious multi-packs /
+bundles are skipped), the cheapest in-stock variant price is taken, `$/TB` is
+computed, condition/tier is inferred from the title (Recertified / New / NAS /
+Enterprise), results are de-duplicated and sorted ascending by `$/TB`.
+
+### CLI
+
+```
+--deals                 Show the best deals (ranked by $/TB) instead of planning
+--deals-size SIZE       Only deals at this exact capacity (e.g. 22TB)
+--deals-min SIZE        Minimum capacity filter
+--deals-max SIZE        Maximum capacity filter
+--deals-limit N         How many to show (default 12)
+--deals-condition COND  Filter by condition: recertified | new | nas | enterprise
+--with-deals            Append a short "top deals near your drive size" footer
+                        to a normal plan
+```
+
+Example:
+
+```console
+$ raid_architect.py --deals --deals-limit 5
+══════════════════════════════════════════════════════════════════════════
+                  Best hard-drive deals — ranked by $/TB
+══════════════════════════════════════════════════════════════════════════
+  Sources: ServerPartDeals (26), Water Panther (208)
+
+  #        $/TB      Price     Cap  Condition    Retailer
+  ──────────────────────────────────────────────────────────────────────
+  #1     $10.55    $189.99   18 TB  Recertified  Water Panther
+      Refurbished: 18TB 7.2K SAS 12Gb/s 3.5" HDD for HPE ProLiant…
+  #2     $10.62     $84.99    8 TB  Recertified  Water Panther
+      Refurbished: 8TB 7.2K SATA 6Gb/s 3.5" HDD for HPE ProLiant…
+  ...
+  Prices move constantly — verify on the retailer's site before buying.
+```
+
+Each row includes a clickable **OSC 8 terminal hyperlink** to the product page
+(falling back to `label (url)` plaintext on terminals without hyperlink
+support), honours `NO_COLOR` / non-TTY output, and supports `--json` for
+structured data. When no deals match (or every source is unreachable) it prints
+a clean message instead of erroring.
+
+### API — `GET`/`POST /api/deals`
+
+Query-string (GET) or JSON/form body (POST) filters: `size` (exact capacity),
+`min` / `max` (capacity range), `limit` (1–50, default 12), `condition`.
+
+```console
+$ curl -s '/api/deals?min=16TB&max=24TB&condition=recertified&limit=3'
+```
+
+```jsonc
+{
+  "version": "2.0.0",
+  "count": 3,
+  "any_source_ok": true,
+  "sources": [
+    { "name": "ServerPartDeals", "ok": true, "count": 26 },
+    { "name": "Water Panther",  "ok": true, "count": 208 }
+  ],
+  "deals": [
+    {
+      "title": "Refurbished: 18TB 7.2K SAS 12Gb/s 3.5\" HDD …",
+      "capacity_tb": 18.0,
+      "price": 189.99,
+      "price_per_tb": 10.555,
+      "condition": "Recertified",
+      "retailer": "Water Panther",
+      "url": "https://waterpanther.com/products/…"
+    }
+  ]
+}
+```
+
+The response carries a short `Cache-Control: public, max-age=300` (deals don't
+change second-to-second). If every source is unreachable the endpoint still
+returns **200** with `count: 0`, `any_source_ok: false` and per-source status —
+never a 500.
+
+### Web UI
+
+On wide screens the best deals appear as **rails down the left and right sides**
+of the planner (planner stays centered), with appealing cards that lead with the
+`$/TB`, plus capacity, price, a colour-coded condition badge, retailer, rank
+badge and a link that opens the product page in a new tab (`rel="noopener"`).
+On narrow / mobile widths the rails **collapse into a single stacked grid**
+below the planner (no overlap, nothing disappears). The rails load
+asynchronously from `/api/deals` with a loading skeleton and a clean empty
+state, and highlight any deal whose capacity matches the drive size you're
+planning with.
+
+> **Disclaimer:** Drive deals are volatile and vary by region, capacity, seller
+> and availability. These listings reflect a handful of retailers at one moment
+> in time. **Always verify the current price and condition on the retailer's own
+> site before buying.** RAID Architect is for planning/estimation only and is not
+> affiliated with any retailer or manufacturer.
 
 [↑ back to contents](#table-of-contents)
 
