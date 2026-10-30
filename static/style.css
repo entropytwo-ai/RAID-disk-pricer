@@ -219,6 +219,9 @@ fieldset { border: none; margin: 0; padding: 0; }
   background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #06202b;
   padding: 3px 8px; border-radius: 999px; box-shadow: var(--shadow); }
 .deal-rank.top { background: linear-gradient(90deg, var(--green), var(--accent-2)); }
+.deal-stock { position: absolute; top: -9px; right: -6px; font-size: .62rem; font-weight: 700;
+  color: var(--green); background: rgba(52,211,153,.12); border: 1px solid rgba(52,211,153,.4);
+  padding: 2px 7px; border-radius: 999px; letter-spacing: .2px; }
 
 .deal-ppt { font-size: 1.4rem; font-weight: 800; color: var(--green); line-height: 1.05; }
 .deal-ppt small { font-size: .6rem; font-weight: 700; color: var(--muted); letter-spacing: .4px; }

@@ -411,9 +411,19 @@ class TestDealsParsing(unittest.TestCase):
         ]}
         self.assertAlmostEqual(ra._product_price(prod), 320.0)
 
-    def test_product_price_falls_back_to_unavailable(self):
+    def test_product_price_none_when_out_of_stock(self):
+        # Every variant is out of stock -> the listing must be dropped (None),
+        # never surfaced at an out-of-stock price.
         prod = {"variants": [{"price": "300.00", "available": False}]}
-        self.assertAlmostEqual(ra._product_price(prod), 300.0)
+        self.assertIsNone(ra._product_price(prod))
+
+    def test_product_price_ignores_cheaper_out_of_stock(self):
+        # A cheaper but out-of-stock variant must not win over an in-stock one.
+        prod = {"variants": [
+            {"price": "250.00", "available": False},
+            {"price": "320.00", "available": True},
+        ]}
+        self.assertAlmostEqual(ra._product_price(prod), 320.0)
 
     def test_product_price_none_when_no_price(self):
         self.assertIsNone(ra._product_price({"variants": [{"price": "0"}]}))
@@ -506,6 +516,56 @@ class TestDeals(unittest.TestCase):
         titles = [d.title for d in ra.get_deals().deals]
         self.assertEqual(titles.count("Seagate 14TB Recertified"), 1)
 
+    def test_out_of_stock_products_excluded(self):
+        # A feed where the whole catalog is sold out -> zero deals surfaced.
+        oos = {"products": [
+            {"title": "Seagate 16TB Recertified", "handle": "oos-16",
+             "variants": [{"price": "150.00", "available": False}]},
+            {"title": "WD 20TB Recertified", "handle": "oos-20",
+             "variants": [{"price": "200.00", "available": False},
+                          {"price": "190.00", "available": False}]},
+        ]}
+        ra._fetch_products_json = lambda url, timeout=12: (
+            oos if "serverpartdeals" in url else None)
+        ra.reset_deals_cache()
+        result = ra.get_deals()
+        self.assertEqual(result.deals, [])
+        # The source still fetched fine; it just had nothing in stock.
+        self.assertTrue({s.name: s for s in result.sources}["ServerPartDeals"].ok)
+
+    def test_mixed_stock_keeps_only_in_stock(self):
+        mixed = {"products": [
+            {"title": "Seagate 16TB Recertified", "handle": "m-16",
+             "variants": [{"price": "150.00", "available": False}]},   # OOS -> drop
+            {"title": "WD 20TB Recertified", "handle": "m-20",
+             "variants": [{"price": "200.00", "available": True}]},    # in stock
+        ]}
+        ra._fetch_products_json = lambda url, timeout=12: (
+            mixed if "serverpartdeals" in url else None)
+        ra.reset_deals_cache()
+        titles = [d.title for d in ra.get_deals().deals]
+        self.assertEqual(titles, ["WD 20TB Recertified"])
+        self.assertTrue(all(d.in_stock for d in ra.get_deals().deals))
+
+    def test_pagination_merges_pages(self):
+        # Page 1 and page 2 return different in-stock drives; both are merged.
+        page1 = {"products": [
+            {"title": "Seagate 14TB Recertified", "handle": "p1-14",
+             "variants": [{"price": "140.00", "available": True}]}]}
+        page2 = {"products": [
+            {"title": "Seagate 18TB Recertified", "handle": "p2-18",
+             "variants": [{"price": "180.00", "available": True}]}]}
+
+        def paged(url, timeout=12):
+            if "serverpartdeals" not in url:
+                return None
+            return page2 if "page=2" in url else page1
+        ra._fetch_products_json = paged
+        ra.reset_deals_cache()
+        titles = sorted(d.title for d in ra.get_deals().deals)
+        self.assertEqual(titles,
+                         ["Seagate 14TB Recertified", "Seagate 18TB Recertified"])
+
     def test_source_status_reported(self):
         result = ra.get_deals()
         status = {s.name: s for s in result.sources}
@@ -537,7 +597,7 @@ class TestDeals(unittest.TestCase):
         deal = d["deals"][0]
         self.assertEqual(set(deal.keys()),
                          {"title", "capacity_tb", "price", "price_per_tb",
-                          "condition", "retailer", "url"})
+                          "condition", "retailer", "url", "in_stock"})
 
     def test_get_best_deals_wrapper(self):
         deals = ra.get_best_deals(limit=3)

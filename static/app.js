@@ -291,6 +291,7 @@ function dealCard(d, rank) {
   const cond = d.condition || "Unknown";
   a.innerHTML =
     `<span class="deal-rank${rank <= 3 ? " top" : ""}">#${rank}</span>` +
+    (d.in_stock !== false ? `<span class="deal-stock">● In stock</span>` : "") +
     `<div class="deal-ppt">${ppt}<small> / TB</small></div>` +
     `<div class="deal-meta"><span class="deal-cap">${tb(d.capacity_tb)}</span>` +
     `<span class="deal-price">${money(d.price)}</span></div>` +

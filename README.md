@@ -459,22 +459,32 @@ are buying bulk storage. The same scraper powers the CLI, the JSON API and the
 web UI (one source of truth: all fetching/parsing/ranking lives in
 `raid_architect.py`).
 
+**In stock only.** Every listing shown is **verified in stock** at fetch time. A
+product's price is resolved from its *available* variants only — if all variants
+are sold out the listing is dropped entirely rather than shown with a stale,
+misleadingly-low out-of-stock price. (This was the old behaviour's bug: the
+cheapest "$10/TB" deals were often long-sold-out listings you could never
+actually buy.)
+
 **Retailers scraped.** A deliberately small set of retailers that expose a
 structured, polite-to-fetch Shopify `products.json` feed (so we stay a good
-citizen on a shared IP — each feed is fetched **once per run**, cached, with a
+citizen on a shared IP — each page is fetched **once per run**, cached, with a
 normal User-Agent and a sane timeout, and any unreachable source is skipped
-gracefully):
+gracefully). To widen coverage we **paginate** each feed (up to a few pages,
+stopping early once a page adds no new in-stock drives), so hundreds of live
+in-stock listings are considered per run rather than a single short page:
 
 | Retailer | Feed | Default condition |
 |----------|------|-------------------|
-| **ServerPartDeals** | `manufacturer-recertified-drives/products.json` | Recertified |
-| **Water Panther** | `products.json` | inferred from title |
+| **ServerPartDeals** | `collections/hard-drives/products.json` (paginated) | Recertified |
+| **Water Panther** | `products.json` (paginated) | inferred from title |
 
 Each listing's title is parsed for a single-drive capacity (robust to `22TB`,
 `22 TB`, `20tb`, `18.0 TB`; implausible values >100 TB and obvious multi-packs /
-bundles are skipped), the cheapest in-stock variant price is taken, `$/TB` is
-computed, condition/tier is inferred from the title (Recertified / New / NAS /
-Enterprise), results are de-duplicated and sorted ascending by `$/TB`.
+bundles are skipped), the cheapest **in-stock** variant price is taken (listings
+with no in-stock variant are excluded), `$/TB` is computed, condition/tier is
+inferred from the title (Recertified / New / NAS / Enterprise), results are
+de-duplicated across pages/sources and sorted ascending by `$/TB`.
 
 ### CLI
 
@@ -496,14 +506,14 @@ $ raid_architect.py --deals --deals-limit 5
 ══════════════════════════════════════════════════════════════════════════
                   Best hard-drive deals — ranked by $/TB
 ══════════════════════════════════════════════════════════════════════════
-  Sources: ServerPartDeals (26), Water Panther (208)
+  Sources: ServerPartDeals (294), Water Panther (184)
 
   #        $/TB      Price     Cap  Condition    Retailer
   ──────────────────────────────────────────────────────────────────────
-  #1     $10.55    $189.99   18 TB  Recertified  Water Panther
-      Refurbished: 18TB 7.2K SAS 12Gb/s 3.5" HDD for HPE ProLiant…
-  #2     $10.62     $84.99    8 TB  Recertified  Water Panther
-      Refurbished: 8TB 7.2K SATA 6Gb/s 3.5" HDD for HPE ProLiant…
+  #1     $14.50    $289.99   20 TB  Recertified  ServerPartDeals
+      Seagate Exos X20 20TB 7.2K SATA 6Gb/s 3.5" Recertified HDD
+  #2     $14.72    $264.99   18 TB  Recertified  ServerPartDeals
+      Seagate Exos X18 18TB 7.2K SATA 6Gb/s 3.5" Recertified HDD
   ...
   Prices move constantly — verify on the retailer's site before buying.
 ```
@@ -529,18 +539,19 @@ $ curl -s '/api/deals?min=16TB&max=24TB&condition=recertified&limit=3'
   "count": 3,
   "any_source_ok": true,
   "sources": [
-    { "name": "ServerPartDeals", "ok": true, "count": 26 },
-    { "name": "Water Panther",  "ok": true, "count": 208 }
+    { "name": "ServerPartDeals", "ok": true, "count": 294 },
+    { "name": "Water Panther",  "ok": true, "count": 184 }
   ],
   "deals": [
     {
-      "title": "Refurbished: 18TB 7.2K SAS 12Gb/s 3.5\" HDD …",
+      "title": "Seagate Exos X18 18TB 7.2K SATA 6Gb/s 3.5\" Recertified HDD",
       "capacity_tb": 18.0,
-      "price": 189.99,
-      "price_per_tb": 10.555,
+      "price": 264.99,
+      "price_per_tb": 14.722,
       "condition": "Recertified",
-      "retailer": "Water Panther",
-      "url": "https://waterpanther.com/products/…"
+      "retailer": "ServerPartDeals",
+      "in_stock": true,
+      "url": "https://serverpartdeals.com/products/…"
     }
   ]
 }
@@ -556,12 +567,12 @@ never a 500.
 The best deals appear in a single **full-width grid below the main planner**, so
 the widened planner has room for its controls and results without crowding. Each
 card leads with the `$/TB`, plus capacity, price, a colour-coded condition badge,
-retailer, rank badge and a link that opens the product page in a new tab
-(`rel="noopener"`). The grid reflows responsively — three or more columns on wide
-screens down to a single column on mobile (nothing overlaps or disappears). It
-loads asynchronously from `/api/deals` with a loading skeleton and a clean empty
-state, and highlights any deal whose capacity matches the drive size you're
-planning with.
+retailer, rank badge, a green **● In stock** pill (every listed deal is verified
+in stock), and a link that opens the product page in a new tab (`rel="noopener"`).
+The grid reflows responsively — three or more columns on wide screens down to a
+single column on mobile (nothing overlaps or disappears). It loads asynchronously
+from `/api/deals` with a loading skeleton and a clean empty state, and highlights
+any deal whose capacity matches the drive size you're planning with.
 
 > **Disclaimer:** Drive deals are volatile and vary by region, capacity, seller
 > and availability. These listings reflect a handful of retailers at one moment

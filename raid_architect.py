@@ -103,22 +103,30 @@ SPD_PRODUCTS_URL = (
 )
 
 #: Retailers with structured, polite-to-fetch Shopify ``products.json`` feeds,
-#: used by the "best deals" scraper. Each source is fetched ONCE per run and
-#: guarded independently — one failing feed never breaks the others. Keep this
-#: list small to be a good citizen on the shared outbound IP.
+#: used by the "best deals" scraper. Each source is guarded independently — one
+#: failing feed never breaks the others — and the whole set is fetched once per
+#: run and cached. Keep this list small to be a good citizen on the shared IP.
+#: Each source may paginate: ``{page}`` in ``url_template`` is filled 1..N and
+#: fetching stops early at the first empty page or the first page that adds no
+#: new in-stock listing (so we stay polite on the shared outbound IP). Sources
+#: without ``{page}`` are fetched exactly once.
 DEAL_SOURCES: list[dict] = [
     {
+        # The broad "hard-drives" collection (recertified + new) carries far more
+        # live, in-stock HDDs than the narrow recertified collection did.
         "name": "ServerPartDeals",
-        "url": ("https://serverpartdeals.com/collections/"
-                "manufacturer-recertified-drives/products.json?limit=250"),
+        "url_template": ("https://serverpartdeals.com/collections/hard-drives/"
+                         "products.json?limit=250&page={page}"),
         "base": "https://serverpartdeals.com",
         "default_condition": "Recertified",
+        "max_pages": 3,
     },
     {
         "name": "Water Panther",
-        "url": "https://waterpanther.com/products.json?limit=250",
+        "url_template": "https://waterpanther.com/products.json?limit=250&page={page}",
         "base": "https://waterpanther.com",
         "default_condition": None,
+        "max_pages": 3,
     },
 ]
 
@@ -898,6 +906,7 @@ class DealListing:
     condition: str          # Recertified / New / NAS / Enterprise / Unknown
     retailer: str
     url: str
+    in_stock: bool = True   # only in-stock listings are ever emitted
 
     def to_dict(self) -> dict:
         return {
@@ -908,6 +917,7 @@ class DealListing:
             "condition": self.condition,
             "retailer": self.retailer,
             "url": self.url,
+            "in_stock": self.in_stock,
         }
 
 
@@ -996,9 +1006,15 @@ def infer_condition(title: str, default: Optional[str] = None) -> str:
 
 
 def _product_price(product: dict) -> Optional[float]:
-    """Return the cheapest available variant price (>0), or None."""
+    """Return the cheapest **in-stock** variant price (>0), or ``None``.
+
+    Only variants Shopify marks ``available: true`` count. If every variant is
+    out of stock (or priced <= 0), this returns ``None`` so the caller drops the
+    listing entirely — the deal finder must never surface an out-of-stock drive.
+    A variant that omits ``available`` is treated as in stock (Shopify always
+    emits the flag for real storefront feeds; this only affects hand-built data).
+    """
     available: list[float] = []
-    any_price: list[float] = []
     for variant in product.get("variants", []):
         try:
             price = float(variant.get("price"))
@@ -1006,11 +1022,9 @@ def _product_price(product: dict) -> Optional[float]:
             continue
         if price <= 0:
             continue
-        any_price.append(price)
         if variant.get("available", True):
             available.append(price)
-    pool = available or any_price
-    return min(pool) if pool else None
+    return min(available) if available else None
 
 
 def _parse_deals_from_products(data: dict, src: dict) -> list[DealListing]:
@@ -1057,22 +1071,42 @@ def _fetch_all_deals(timeout: int = 12,
 
     all_deals: list[DealListing] = []
     statuses: list[SourceStatus] = []
+    seen: set[tuple[str, str]] = set()  # (retailer, url-or-title) -> cross-page dedupe
+
     for src in DEAL_SOURCES:
         name = src.get("name", "?")
-        try:
-            data = _fetch_products_json(src["url"], timeout=timeout)
+        template = src.get("url_template") or src.get("url", "")
+        paginates = "{page}" in template
+        max_pages = int(src.get("max_pages", 1)) if paginates else 1
+        src_count = 0
+        page1_ok = False
+        for page in range(1, max_pages + 1):
+            url = template.format(page=page) if paginates else template
+            try:
+                data = _fetch_products_json(url, timeout=timeout)
+            except Exception:  # pragma: no cover - defensive; never crash
+                break
             if not isinstance(data, dict):
-                statuses.append(SourceStatus(name, False, 0))
-                if verbose:
-                    print(f"  deals: {name} unavailable.", file=sys.stderr)
-                continue
-            parsed = _parse_deals_from_products(data, src)
-            all_deals.extend(parsed)
-            statuses.append(SourceStatus(name, True, len(parsed)))
-        except Exception:  # pragma: no cover - defensive; never crash
-            statuses.append(SourceStatus(name, False, 0))
-            if verbose:
-                print(f"  deals: {name} errored.", file=sys.stderr)
+                break
+            if page == 1:
+                page1_ok = True
+            products = data.get("products", [])
+            if not products:
+                break  # reached end of catalog (valid, empty page)
+            added = 0
+            for d in _parse_deals_from_products(data, src):
+                key = (d.retailer, d.url or d.title)
+                if key in seen:
+                    continue
+                seen.add(key)
+                all_deals.append(d)
+                src_count += 1
+                added += 1
+            if added == 0:
+                break  # nothing new in-stock on this page -> stop paging politely
+        statuses.append(SourceStatus(name, page1_ok, src_count))
+        if verbose and not page1_ok:
+            print(f"  deals: {name} unavailable.", file=sys.stderr)
 
     _DEALS_CACHE = (all_deals, statuses)
     return _DEALS_CACHE
