@@ -6,7 +6,7 @@
 <title>RAID Architect — plan &amp; price your array</title>
 <meta name="description" content="Plan a RAID array and price the drives across Recertified, NAS Pro and Enterprise tiers — right in your browser.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💽</text></svg>">
-<link rel="stylesheet" href="/static/style.css?v=1">
+<link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body>
 <header class="site-header">
@@ -98,7 +98,7 @@
         <summary>Pricing options</summary>
 
         <fieldset class="field">
-          <legend>Pricing source</legend>
+          <legend>Pricing source <span class="muted">(for “Compare all levels”)</span></legend>
           <div class="seg">
             <input type="radio" id="src-base" name="pricing_source" value="baseline">
             <label for="src-base">Baseline</label>
@@ -169,11 +169,25 @@
         </tbody>
       </table>
 
-      <h3 class="section-h">Pricing <span class="muted" id="priceNote"></span></h3>
+      <h3 class="section-h">Pricing — Baseline vs Live <span class="muted" id="priceNote"></span></h3>
+
+      <div id="liveNote" class="live-note hidden"></div>
+
+      <div class="cmp-metric-toggle" role="group" aria-label="Which pricing metric to compare">
+        <button type="button" class="chip active" data-metric="total">Total</button>
+        <button type="button" class="chip" data-metric="per_drive">$ / drive</button>
+        <button type="button" class="chip" data-metric="per_tb">$ / TB</button>
+      </div>
+
       <div class="table-scroll">
-        <table class="price-table">
-          <thead><tr><th>Tier</th><th class="num">$/TB</th><th class="num">$/drive</th><th class="num">Total</th></tr></thead>
-          <tbody id="priceBody"></tbody>
+        <table class="price-table cmp-price">
+          <thead><tr>
+            <th>Tier</th>
+            <th class="num">Baseline<br><span class="col-sub">early-2026</span></th>
+            <th class="num">Live<br><span class="col-sub" id="liveColSub">ServerPartDeals</span></th>
+            <th class="num">Δ (Δ%)</th>
+          </tr></thead>
+          <tbody id="cmpPriceBody"></tbody>
         </table>
       </div>
 
@@ -219,6 +233,6 @@
   </div>
 </footer>
 
-<script src="/static/app.js?v=1"></script>
+<script src="/static/app.js?v=2"></script>
 </body>
 </html>

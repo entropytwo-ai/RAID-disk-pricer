@@ -32,6 +32,7 @@ available.
 - [JSON output](#json-output)
 - [Testing](#testing)
 - [Web app (self-hosting)](#web-app-self-hosting)
+  - [Baseline vs live comparison (web UI & API)](#baseline-vs-live-comparison-web-ui--api)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -464,6 +465,67 @@ sudo rm /etc/systemd/system/raid-web.service
 sudo rm /etc/nginx/conf.d/24ff2001c.conf /etc/nginx/conf.d/raid-architect.conf
 sudo systemctl daemon-reload && sudo nginx -t && sudo systemctl reload nginx
 ```
+
+[↑ back to contents](#table-of-contents)
+
+---
+
+### Baseline vs live comparison (web UI & API)
+
+The single-level planner (`POST /api/plan`) prices the **same layout twice** and
+shows both side by side — the early-2026 static **baseline**
+(`HISTORICAL_RATES`) and the **live** retailer pricing (ServerPartDeals, which
+auto-falls back to the baseline if the fetch fails). The web UI makes this
+comparison the primary presentation: for each tier it renders
+**Baseline | Live | Δ (Δ%)**, with the delta coloured (red = more expensive,
+green = cheaper) and a metric toggle for **Total / $ per drive / $ per TB**. A
+note is shown when live pricing was unavailable (the two columns are then
+identical) or when a manual override is driving the Live column. Any manual
+rate / per-drive overrides apply to the **Live** column only — the baseline
+stays the fixed yardstick — mirroring the CLI's comparison.
+
+`POST /api/plan` keeps its existing keys (`layout`, `pricing`, `market_links`,
+`tier_order`, …) — `pricing` remains the live set the user would pay — and adds a
+new `comparison` block:
+
+```jsonc
+{
+  "layout":  { ... },        // unchanged
+  "pricing": { ... },        // unchanged — the LIVE set (incl. overrides)
+  "comparison": {
+    "baseline": {            // early-2026 reference, never overridden
+      "source": "baseline",
+      "note":   "early-2026 estimate",
+      "rates_per_tb": { "Refurb": 15.5, "NAS": 22.5, "Ent": 25.0 }
+    },
+    "live": {                // retailer pricing (+ any manual overrides)
+      "source": "live",
+      "note":   "Live ServerPartDeals recertified pricing (median match)",
+      "rates_per_tb": { "Refurb": 33.5, "NAS": 48.57, "Ent": 53.6 }
+    },
+    "live_succeeded":        true,   // false => live fetch failed, fell back
+    "live_has_manual_override": false,
+    "live_equals_baseline":  false,  // true only when fallback AND no override
+    "tier_order": ["Refurb", "NAS", "Ent"],
+    "tiers": [
+      {
+        "tier":  "Refurb",
+        "label": "Recertified",
+        "baseline": { "per_tb": 15.5, "per_drive": 341.0, "total": 6138.0 },
+        "live":     { "per_tb": 33.5, "per_drive": 737.0, "total": 13266.0 },
+        "delta":    { "per_tb": 18.0, "per_drive": 396.0, "total": 7128.0,
+                      "pct": 116.1 }      // (live − baseline) / baseline × 100
+      }
+      // ... NAS, Ent
+    ]
+  }
+}
+```
+
+When `live_succeeded` is `false`, the `live` numbers equal the `baseline`
+numbers and every `delta` is `0` — the UI surfaces a clear "live pricing
+unavailable" note. The disclaimer (live = one retailer at one moment; baseline =
+a rough early-2026 estimate) is always shown.
 
 [↑ back to contents](#table-of-contents)
 

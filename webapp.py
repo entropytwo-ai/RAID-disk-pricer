@@ -78,23 +78,109 @@ def _select_level(data: dict) -> str:
     return "5"
 
 
-def _resolve_rates_from(data: dict, size_tb: float) -> ra.PricingRates:
-    """Build pricing rates honouring the UI's source + override inputs."""
-    source = str(data.get("pricing_source", "live")).lower()
-    want_live = source == "live"
-    manual = {
+def _manual_from(data: dict) -> dict:
+    """Extract per-tier manual $/TB overrides from the request."""
+    return {
         "refurb": _opt_float(data, "rate_refurb"),
         "nas": _opt_float(data, "rate_nas"),
         "ent": _opt_float(data, "rate_ent"),
     }
+
+
+def _resolve_rates_from(data: dict, size_tb: float) -> ra.PricingRates:
+    """Build pricing rates honouring the UI's source + override inputs."""
+    source = str(data.get("pricing_source", "live")).lower()
+    want_live = source == "live"
     price_per_drive = _opt_float(data, "price_per_drive")
     return ra.resolve_rates(
         size_tb,
         want_live=want_live,
-        manual=manual,
+        manual=_manual_from(data),
         price_per_drive=price_per_drive,
         verbose=False,
     )
+
+
+def _rates_block(rates: ra.PricingRates) -> dict:
+    """Serialize a PricingRates into a small JSON block."""
+    return {
+        "source": rates.source,
+        "note": rates.note,
+        "rates_per_tb": {
+            "Refurb": rates.refurb,
+            "NAS": rates.nas,
+            "Ent": rates.ent,
+        },
+    }
+
+
+def build_comparison(layout, size_tb: float, manual: dict,
+                     price_per_drive: Optional[float]):
+    """Price *layout* under BOTH the static baseline and live pricing.
+
+    Returns ``(comparison_dict, live_pricing)``:
+
+    * ``comparison_dict`` — baseline block, live block, per-tier
+      baseline/live/delta numbers, and flags telling the UI whether the live
+      fetch actually succeeded or silently fell back to the baseline.
+    * ``live_pricing`` — the live :class:`PricingResult` (what the user would
+      pay), reused as the plan's primary ``pricing`` field for compatibility.
+
+    The baseline column is the pure early-2026 reference
+    (:data:`raid_architect.HISTORICAL_RATES`) with no overrides, so the delta is
+    always measured against the same yardstick. Manual rate / per-drive
+    overrides are applied on top of the LIVE column only, mirroring the CLI.
+    """
+    # Baseline reference: never live, never overridden.
+    baseline_rates = ra.resolve_rates(
+        size_tb, want_live=False, manual={}, price_per_drive=None, verbose=False
+    )
+    baseline_pricing = ra.price_layout(layout, baseline_rates)
+
+    # Probe whether live pricing is actually reachable (cached within the run,
+    # so this does not add a second network round-trip for the resolve below).
+    live_succeeded = ra.get_live_per_tb(size_tb) is not None
+
+    # Live column honours manual / per-drive overrides (auto-falls back to
+    # baseline inside resolve_rates when the fetch fails).
+    live_rates = ra.resolve_rates(
+        size_tb, want_live=True, manual=manual,
+        price_per_drive=price_per_drive, verbose=False,
+    )
+    live_pricing = ra.price_layout(layout, live_rates)
+
+    has_manual = any(v is not None for v in manual.values()) or price_per_drive is not None
+
+    bq = {q.tier: q for q in baseline_pricing.quotes}
+    lq = {q.tier: q for q in live_pricing.quotes}
+    tiers = []
+    for tier in ra.TIER_ORDER:
+        b, l = bq[tier], lq[tier]
+        pct = ((l.total - b.total) / b.total * 100.0) if b.total else 0.0
+        tiers.append({
+            "tier": tier,
+            "label": ra.TIER_LABELS[tier],
+            "baseline": {"per_tb": b.per_tb, "per_drive": b.per_drive, "total": b.total},
+            "live": {"per_tb": l.per_tb, "per_drive": l.per_drive, "total": l.total},
+            "delta": {
+                "per_tb": l.per_tb - b.per_tb,
+                "per_drive": l.per_drive - b.per_drive,
+                "total": l.total - b.total,
+                "pct": pct,
+            },
+        })
+
+    comparison = {
+        "baseline": _rates_block(baseline_rates),
+        "live": _rates_block(live_rates),
+        "live_succeeded": live_succeeded,
+        "live_has_manual_override": has_manual,
+        # Columns are identical only when live failed AND nothing was overridden.
+        "live_equals_baseline": (not live_succeeded) and (not has_manual),
+        "tier_order": list(ra.TIER_ORDER),
+        "tiers": tiers,
+    }
+    return comparison, live_pricing
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +276,18 @@ def api_plan():
             level_key, size_tb, n,
             hot_spares=hot_spares, groups=groups, group_size=group_size,
         )
-        rates = _resolve_rates_from(data, size_tb)
-        pricing = ra.price_layout(layout, rates)
 
-        result = ra.build_json(layout, pricing)
+        # Price the SAME layout under both the early-2026 baseline and live
+        # pricing, with per-tier deltas. The live set (what the user pays, incl.
+        # any overrides) stays as the primary `pricing` field for compatibility.
+        manual = _manual_from(data)
+        price_per_drive = _opt_float(data, "price_per_drive")
+        comparison, live_pricing = build_comparison(
+            layout, size_tb, manual, price_per_drive
+        )
+
+        result = ra.build_json(layout, live_pricing)
+        result["comparison"] = comparison
         result["market_links"] = {
             tier: [{"label": lbl, "url": url} for lbl, url in links]
             for tier, links in ra.MARKET_LINKS.items()

@@ -7,10 +7,22 @@ const $ = (id) => document.getElementById(id);
 const TIER_CLASS = { Refurb: "dot-refurb", NAS: "dot-nas", Ent: "dot-ent" };
 
 let META = null; // /api/levels payload
+let LAST_COMPARISON = null; // comparison block from the most recent plan
+let CMP_METRIC = "total"; // which metric the Baseline|Live|Δ table shows
 
 // ---- helpers --------------------------------------------------------------
 function money(v) {
   return "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function signedMoney(v) {
+  const s = money(Math.abs(v));
+  if (v > 0.004) return "+" + s;
+  if (v < -0.004) return "−" + s;
+  return s;
+}
+function signedPct(v) {
+  const sign = v > 0.04 ? "+" : v < -0.04 ? "−" : "";
+  return sign + Math.abs(v).toFixed(1) + "%";
 }
 function tb(v) {
   const n = Number(v);
@@ -82,12 +94,11 @@ async function postJSON(url, payload) {
 
 // ---- rendering: single plan ----------------------------------------------
 function renderPlan(data) {
-  const L = data.layout, P = data.pricing;
+  const L = data.layout;
   $("compareResult").classList.add("hidden");
   $("planResult").classList.remove("hidden");
 
   $("planLevelName").textContent = L.level_name;
-  $("planSource").textContent = "pricing: " + P.source;
   $("planSummary").textContent = L.summary;
 
   $("statUsable").textContent = tb(L.usable_capacity_tb);
@@ -105,21 +116,68 @@ function renderPlan(data) {
   $("rowRead").textContent = L.read;
   $("rowWrite").textContent = L.write;
 
-  $("priceNote").textContent = "— " + P.note;
   const order = data.tier_order || ["Refurb", "NAS", "Ent"];
-  const body = $("priceBody");
-  body.innerHTML = "";
-  P.quotes.sort((a, b) => order.indexOf(a.tier) - order.indexOf(b.tier)).forEach((q) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML =
-      `<td><span class="tier-dot ${TIER_CLASS[q.tier] || ""}"></span>${q.label}</td>` +
-      `<td class="num">${money(q.per_tb)}</td>` +
-      `<td class="num">${money(q.per_drive)}</td>` +
-      `<td class="num total">${money(q.total)}</td>`;
-    body.appendChild(tr);
-  });
+
+  // Baseline-vs-live comparison is the primary pricing presentation.
+  LAST_COMPARISON = data.comparison || null;
+  if (LAST_COMPARISON) {
+    renderComparisonBadge(data);
+    renderLiveNote(LAST_COMPARISON);
+    renderCmpPrice();
+  }
 
   renderMarket(data.market_links, order);
+}
+
+function renderComparisonBadge(data) {
+  const c = data.comparison;
+  $("planSource").textContent = c.live_succeeded ? "baseline vs live" : "live unavailable";
+  $("planSource").classList.toggle("warn", !c.live_succeeded);
+  const liveNote = (c.live && c.live.note) ? " — " + c.live.note : "";
+  $("priceNote").textContent = liveNote;
+  // Clarify the Live column sub-label when overrides are in play.
+  $("liveColSub").textContent = c.live_has_manual_override ? "your override" : "ServerPartDeals";
+}
+
+function renderLiveNote(c) {
+  const box = $("liveNote");
+  if (!c.live_succeeded) {
+    box.className = "live-note warn";
+    box.innerHTML = "⚠ <strong>Live pricing unavailable</strong> — the network fetch failed, " +
+      "so the Live column falls back to the baseline and the two columns are identical.";
+    box.classList.remove("hidden");
+  } else if (c.live_has_manual_override) {
+    box.className = "live-note info";
+    box.innerHTML = "ℹ The <strong>Live</strong> column reflects your manual price override(s).";
+    box.classList.remove("hidden");
+  } else {
+    box.classList.add("hidden");
+  }
+}
+
+function renderCmpPrice() {
+  const c = LAST_COMPARISON;
+  if (!c) return;
+  const metric = CMP_METRIC; // "total" | "per_drive" | "per_tb"
+  const body = $("cmpPriceBody");
+  body.innerHTML = "";
+  c.tiers.forEach((t) => {
+    const base = t.baseline[metric];
+    const live = t.live[metric];
+    const d = t.delta[metric];
+    const dir = d > 0.004 ? "up" : d < -0.004 ? "down" : "flat";
+    const deltaCell =
+      `<span class="delta ${dir}">${signedMoney(d)}` +
+      (metric === "total" ? ` <span class="dpct">(${signedPct(t.delta.pct)})</span>` : "") +
+      `</span>`;
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td><span class="tier-dot ${TIER_CLASS[t.tier] || ""}"></span>${t.label}</td>` +
+      `<td class="num">${money(base)}</td>` +
+      `<td class="num live-col">${money(live)}</td>` +
+      `<td class="num">${deltaCell}</td>`;
+    body.appendChild(tr);
+  });
 }
 
 function renderMarket(links, order) {
@@ -210,6 +268,16 @@ async function init() {
   $("level").addEventListener("change", syncLevel);
   $("planForm").addEventListener("submit", doPlan);
   $("compareBtn").addEventListener("click", doCompare);
+
+  // Metric toggle for the Baseline|Live|Δ table (Total / $per-drive / $per-TB).
+  document.querySelectorAll(".cmp-metric-toggle .chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document.querySelectorAll(".cmp-metric-toggle .chip").forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      CMP_METRIC = chip.dataset.metric;
+      renderCmpPrice();
+    });
+  });
 
   try {
     const res = await fetch("/api/levels");

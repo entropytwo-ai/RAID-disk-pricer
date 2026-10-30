@@ -136,6 +136,35 @@ fieldset { border: none; margin: 0; padding: 0; }
 .price-table .total { font-weight: 700; }
 .compare td:first-child { font-weight: 600; }
 
+/* Baseline vs Live comparison */
+.src-badge.warn { color: var(--yellow); border-color: #4a3a1a; background: #241c10; }
+
+.col-sub { display: block; font-size: .64rem; font-weight: 400; color: var(--muted);
+  text-transform: none; letter-spacing: 0; margin-top: 2px; }
+
+.cmp-price .live-col { color: var(--text); font-weight: 600; }
+
+.cmp-metric-toggle { display: inline-flex; background: var(--bg-elev2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 3px; gap: 2px; margin: 0 0 14px; }
+.cmp-metric-toggle .chip { margin: 0; padding: 6px 14px; border: none; border-radius: 8px; cursor: pointer;
+  font-size: .82rem; font-weight: 500; color: var(--muted); background: transparent; transition: .15s; }
+.cmp-metric-toggle .chip:hover { color: var(--text); }
+.cmp-metric-toggle .chip.active { background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  color: #06202b; font-weight: 700; }
+
+.delta { font-weight: 600; white-space: nowrap; }
+.delta.up { color: var(--red); }
+.delta.down { color: var(--green); }
+.delta.flat { color: var(--muted); }
+.dpct { font-size: .78rem; opacity: .85; }
+
+.live-note { font-size: .84rem; border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 14px; margin: 0 0 14px; }
+.live-note.warn { border-color: #4a3a1a; background: #241c10; color: #fde68a; }
+.live-note.warn strong { color: var(--yellow); }
+.live-note.info { border-color: #1a3a4a; background: #10202a; color: #bae6fd; }
+.live-note.info strong { color: var(--accent-2); }
+
 .market { display: grid; gap: 10px; }
 .market-row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; }
 .market-row .mlabel { font-size: .8rem; color: var(--muted); min-width: 130px; }

@@ -274,5 +274,102 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(json.loads(out)["layout"]["level"], "6")
 
 
+# ---------------------------------------------------------------------------
+# Web app: baseline-vs-live comparison block (build_comparison + /api/plan)
+# ---------------------------------------------------------------------------
+import webapp  # noqa: E402
+
+
+class TestWebComparison(unittest.TestCase):
+    """Exercise the web layer's baseline-vs-live comparison."""
+
+    # A deterministic SPD-style catalog: 22TB recert priced so per-TB == 20.0.
+    LIVE_FIXTURE = {"products": [
+        {"title": "WD 22TB Recertified", "variants": [{"price": "440.00"}]},
+    ]}
+
+    def setUp(self):
+        self.client = webapp.app.test_client()
+        # Clear the cross-run live-price cache so each test is deterministic.
+        ra._LIVE_CACHE.clear()
+        self._orig_fetch = ra._fetch_products_json
+
+    def tearDown(self):
+        ra._fetch_products_json = self._orig_fetch
+        ra._LIVE_CACHE.clear()
+
+    def _layout(self):
+        # RAID 6, 22TB drives, 340TB target — the task's sample plan.
+        n = ra.drives_for_capacity("6", 22.0, 340.0)
+        return ra.compute_layout("6", 22.0, n)
+
+    # -- build_comparison (pure) -------------------------------------------
+
+    def test_live_success_has_both_columns_and_deltas(self):
+        ra._fetch_products_json = lambda *a, **k: self.LIVE_FIXTURE
+        layout = self._layout()
+        cmp, live_pricing = webapp.build_comparison(
+            layout, 22.0, {"refurb": None, "nas": None, "ent": None}, None
+        )
+        self.assertTrue(cmp["live_succeeded"])
+        self.assertFalse(cmp["live_has_manual_override"])
+        self.assertFalse(cmp["live_equals_baseline"])
+        self.assertEqual(cmp["tier_order"], ["Refurb", "NAS", "Ent"])
+        # Baseline refurb stays the historical reference; live reflects fixture.
+        self.assertEqual(cmp["baseline"]["rates_per_tb"]["Refurb"],
+                         ra.HISTORICAL_RATES["Refurb"])
+        self.assertAlmostEqual(cmp["live"]["rates_per_tb"]["Refurb"], 20.0)
+        # Every tier carries baseline, live, and a delta == live - baseline.
+        for t in cmp["tiers"]:
+            for metric in ("per_tb", "per_drive", "total"):
+                self.assertAlmostEqual(
+                    t["delta"][metric], t["live"][metric] - t["baseline"][metric]
+                )
+            b_total = t["baseline"]["total"]
+            expect_pct = (t["live"]["total"] - b_total) / b_total * 100.0
+            self.assertAlmostEqual(t["delta"]["pct"], expect_pct)
+
+    def test_fallback_when_live_fetch_fails(self):
+        ra._fetch_products_json = lambda *a, **k: None
+        layout = self._layout()
+        cmp, _ = webapp.build_comparison(
+            layout, 22.0, {"refurb": None, "nas": None, "ent": None}, None
+        )
+        self.assertFalse(cmp["live_succeeded"])
+        self.assertTrue(cmp["live_equals_baseline"])
+        for t in cmp["tiers"]:
+            self.assertAlmostEqual(t["delta"]["total"], 0.0)
+            self.assertAlmostEqual(t["baseline"]["total"], t["live"]["total"])
+
+    def test_manual_override_flows_to_live_only(self):
+        ra._fetch_products_json = lambda *a, **k: self.LIVE_FIXTURE
+        layout = self._layout()
+        cmp, _ = webapp.build_comparison(
+            layout, 22.0, {"refurb": 12.5, "nas": None, "ent": None}, None
+        )
+        self.assertTrue(cmp["live_has_manual_override"])
+        # Baseline column untouched by the override; live column honours it.
+        self.assertEqual(cmp["baseline"]["rates_per_tb"]["Refurb"],
+                         ra.HISTORICAL_RATES["Refurb"])
+        self.assertAlmostEqual(cmp["live"]["rates_per_tb"]["Refurb"], 12.5)
+
+    # -- /api/plan (full endpoint) -----------------------------------------
+
+    def test_api_plan_includes_comparison(self):
+        ra._fetch_products_json = lambda *a, **k: self.LIVE_FIXTURE
+        resp = self.client.post("/api/plan", json={
+            "capacity": "340TB", "size": "22TB", "level": "6",
+        })
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.get_json()
+        self.assertIn("comparison", payload)
+        self.assertIn("pricing", payload)  # primary field preserved
+        cmp = payload["comparison"]
+        self.assertTrue(cmp["live_succeeded"])
+        self.assertEqual(len(cmp["tiers"]), 3)
+        self.assertIn("baseline", cmp)
+        self.assertIn("live", cmp)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
