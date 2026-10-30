@@ -6,16 +6,28 @@
 <title>RAID Architect — plan &amp; price your array</title>
 <meta name="description" content="Plan a RAID array and price the drives across Recertified, NAS Pro and Enterprise tiers — right in your browser.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💽</text></svg>">
-<link rel="stylesheet" href="/static/style.css?v=5">
+<link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
 <header class="site-header">
   <div class="wrap header-inner">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">💽</span>
-      <div>
-        <h1>RAID&nbsp;Architect</h1>
-        <p class="tagline">Plan your array &amp; price the drives — no install required.</p>
+    <div class="header-left">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">💽</span>
+        <div>
+          <h1>RAID&nbsp;Architect</h1>
+          <p class="tagline">Plan your array &amp; price the drives — no install required.</p>
+        </div>
+      </div>
+      <div class="donate" aria-label="Bitcoin donation">
+        <img class="donate-qr" src="/static/donate-bitcoin-qr.png" width="52" height="52"
+             alt="Bitcoin donation QR code — bc1qu6dkcchurnutgc40y6n53s3zm588z9nnkm2ygq">
+        <div class="donate-body">
+          <span class="donate-title">💛 Donate Bitcoin</span>
+          <code class="donate-addr">bc1qu6dkcchurnutgc40y6n53s3zm588z9nnkm2ygq</code>
+          <button type="button" class="donate-copy" data-addr="bc1qu6dkcchurnutgc40y6n53s3zm588z9nnkm2ygq"
+                  onclick="navigator.clipboard&amp;&amp;navigator.clipboard.writeText(this.dataset.addr).then(()=>{const t=this.textContent;this.textContent='Copied!';this.classList.add('ok');setTimeout(()=>{this.textContent=t;this.classList.remove('ok');},1300);})">Copy address</button>
+        </div>
       </div>
     </div>
     <a class="gh-link" href="https://github.com/entropytwo-ai/RAID-disk-pricer" target="_blank" rel="noopener">GitHub ↗</a>
