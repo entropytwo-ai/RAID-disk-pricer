@@ -11,6 +11,8 @@ pricing baseline — and can optionally fetch **live** recertified-drive pricing
 from [ServerPartDeals](https://serverpartdeals.com) when a web fetcher is
 available.
 
+It now attempts to find you the best deals on drives. This functionality is currently limited and I hope to expand it's capabilities (search more of the internet) later on.
+
 <table><tr>
 <td><img src=".github/donate-bitcoin-qr.png" width="96" alt="Bitcoin donation QR code"></td>
 <td><sub>💛 If you find this project useful, I'd be grateful for any donation. Thank you!<br>
