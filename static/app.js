@@ -168,7 +168,7 @@ function renderCmpPrice() {
     const dir = d > 0.004 ? "up" : d < -0.004 ? "down" : "flat";
     const deltaCell =
       `<span class="delta ${dir}">${signedMoney(d)}` +
-      (metric === "total" ? ` <span class="dpct">(${signedPct(t.delta.pct)})</span>` : "") +
+      ` <span class="dpct">(${signedPct(t.delta.pct)})</span>` +
       `</span>`;
     const tr = document.createElement("tr");
     tr.innerHTML =
