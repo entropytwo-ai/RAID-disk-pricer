@@ -234,24 +234,41 @@ function renderCompare(data) {
 }
 
 // ---- actions --------------------------------------------------------------
-// Remember the per-drive size the user typed, so it survives a page reload.
-const SIZE_STORE_KEY = "raidArchitect.lastSize";
-function rememberSize() {
+// Remember the values the user typed in these fields, so they survive a reload.
+const PERSISTED_FIELDS = {
+  size: "raidArchitect.lastSize",          // Per-drive size
+  capacity: "raidArchitect.lastCapacity",  // Target usable capacity
+};
+function rememberFields() {
   try {
-    const v = $("size").value.trim();
-    if (v) localStorage.setItem(SIZE_STORE_KEY, v);
+    for (const [id, key] of Object.entries(PERSISTED_FIELDS)) {
+      const el = $(id);
+      if (!el) continue;
+      const v = el.value.trim();
+      if (v) localStorage.setItem(key, v);
+    }
   } catch (_) { /* storage unavailable (private mode, etc.) — no-op */ }
 }
-function restoreSize() {
+function restoreFields() {
   try {
-    const v = localStorage.getItem(SIZE_STORE_KEY);
-    if (v) $("size").value = v;
-  } catch (_) { /* storage unavailable — keep the default */ }
+    for (const [id, key] of Object.entries(PERSISTED_FIELDS)) {
+      const el = $(id);
+      if (!el) continue;
+      const v = localStorage.getItem(key);
+      if (v) el.value = v;
+    }
+  } catch (_) { /* storage unavailable — keep the defaults */ }
+}
+function wireFieldPersistence() {
+  for (const id of Object.keys(PERSISTED_FIELDS)) {
+    const el = $(id);
+    if (el) el.addEventListener("input", rememberFields);
+  }
 }
 
 async function doPlan(e) {
   if (e) e.preventDefault();
-  rememberSize(); // persist the capacity entered before planning
+  rememberFields(); // persist the typed values before planning
   const btn = $("planBtn");
   btn.disabled = true;
   setStatus("loading", "Computing array plan…");
@@ -405,7 +422,8 @@ async function init() {
     $("verTag").textContent = "v" + META.version;
   } catch (_) { /* level dropdown still has the Auto option */ }
 
-  restoreSize(); // bring back the last per-drive size the user planned with
+  restoreFields();        // bring back the last values the user typed
+  wireFieldPersistence(); // and keep them saved as they type
   syncMode();
   syncLevel();
   syncSource();

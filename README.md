@@ -581,6 +581,11 @@ single column on mobile (nothing overlaps or disappears). It loads asynchronousl
 from `/api/deals` with a loading skeleton and a clean empty state, and highlights
 any deal whose capacity matches the drive size you're planning with.
 
+The **Per-drive size** and **Target usable capacity** fields are remembered in
+`localStorage` as you type, so your last-entered values are restored automatically
+on the next page load or refresh (falling back to the defaults when storage is
+unavailable).
+
 > **Disclaimer:** Drive deals are volatile and vary by region, capacity, seller
 > and availability. These listings reflect a handful of retailers at one moment
 > in time. **Always verify the current price and condition on the retailer's own
