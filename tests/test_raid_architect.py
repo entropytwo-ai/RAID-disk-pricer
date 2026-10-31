@@ -605,6 +605,66 @@ class TestDeals(unittest.TestCase):
         self.assertLessEqual(len(deals), 3)
         self.assertIsInstance(deals[0], ra.DealListing)
 
+    def test_diversify_caps_two_per_capacity(self):
+        # Five distinct 12TB listings at distinct prices -> only the 2 cheapest kept.
+        many = {"products": [
+            {"title": f"HP 12TB Recertified {i}", "handle": f"d12-{i}",
+             "variants": [{"price": f"{280 + i * 10}.00", "available": True}]}
+            for i in range(5)
+        ]}
+        ra._fetch_products_json = lambda url, timeout=12: (
+            many if "serverpartdeals" in url else None)
+        ra.reset_deals_cache()
+        deals = ra.get_deals(limit=50).deals
+        self.assertEqual(len(deals), 2)
+        self.assertTrue(all(d.capacity_tb == 12.0 for d in deals))
+        # The two cheapest ($280 and $290) survive.
+        self.assertEqual(sorted(d.price for d in deals), [280.0, 290.0])
+
+    def test_diversify_drops_same_capacity_same_price(self):
+        # Many 12TB listings all at the SAME price -> only ONE survives
+        # (two kept must have different prices).
+        same = {"products": [
+            {"title": f"HP 12TB Recertified {i}", "handle": f"s12-{i}",
+             "variants": [{"price": "299.00", "available": True}]}
+            for i in range(6)
+        ]}
+        ra._fetch_products_json = lambda url, timeout=12: (
+            same if "serverpartdeals" in url else None)
+        ra.reset_deals_cache()
+        deals = ra.get_deals(limit=50).deals
+        self.assertEqual(len(deals), 1)
+        self.assertEqual(deals[0].capacity_tb, 12.0)
+
+    def test_diversify_other_capacities_unaffected(self):
+        # Different capacities each keep up to 2; capping 12TB frees room for others.
+        mix = {"products": [
+            {"title": "HP 12TB Recertified A", "handle": "x-12a",
+             "variants": [{"price": "299.00", "available": True}]},
+            {"title": "HP 12TB Recertified B", "handle": "x-12b",
+             "variants": [{"price": "310.00", "available": True}]},
+            {"title": "HP 12TB Recertified C", "handle": "x-12c",
+             "variants": [{"price": "320.00", "available": True}]},  # 3rd 12TB -> drop
+            {"title": "WD 16TB Recertified", "handle": "x-16",
+             "variants": [{"price": "360.00", "available": True}]},
+        ]}
+        ra._fetch_products_json = lambda url, timeout=12: (
+            mix if "serverpartdeals" in url else None)
+        ra.reset_deals_cache()
+        caps = sorted(d.capacity_tb for d in ra.get_deals(limit=50).deals)
+        self.assertEqual(caps, [12.0, 12.0, 16.0])
+
+    def test_diversify_helper_preserves_best_first_order(self):
+        # Unit-level: helper keeps input order (assumed pre-sorted best-first).
+        mk = lambda cap, price, ppt: ra.DealListing(
+            title=f"{cap}TB @ {price}", capacity_tb=cap, price=price,
+            price_per_tb=ppt, condition="Recertified", retailer="X", url="u")
+        src = [mk(12, 280, 23.3), mk(12, 290, 24.2), mk(12, 300, 25.0),
+               mk(16, 360, 22.5)]
+        out = ra._diversify_by_capacity(src)
+        self.assertEqual([(d.capacity_tb, d.price) for d in out],
+                         [(12, 280), (12, 290), (16, 360)])
+
 
 class TestDealsWeb(unittest.TestCase):
     """/api/deals endpoint over mocked network."""

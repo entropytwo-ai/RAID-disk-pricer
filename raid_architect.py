@@ -1125,6 +1125,28 @@ def _normalize_condition_filter(condition: Optional[str]) -> Optional[str]:
     return _CONDITION_ALIASES.get(key, key)
 
 
+def _diversify_by_capacity(deals: list, max_per_capacity: int = 2) -> list:
+    """Limit how many listings of the same capacity appear in the ranked results.
+
+    Keeps at most ``max_per_capacity`` (default 2) listings for any single drive
+    capacity, and those kept must each have a *distinct* price — otherwise a dozen
+    identical "12 TB @ $299" listings crowd out every other size. Assumes ``deals``
+    is already sorted best-first (ascending $/TB), so the cheapest, most relevant
+    listings survive. Order is otherwise preserved.
+    """
+    kept: list = []
+    by_cap: dict = {}  # capacity -> set of rounded prices already kept
+    for d in deals:
+        cap = round(d.capacity_tb, 3)
+        prices = by_cap.setdefault(cap, set())
+        price = round(d.price, 2)
+        if len(prices) >= max_per_capacity or price in prices:
+            continue
+        prices.add(price)
+        kept.append(d)
+    return kept
+
+
 def get_deals(min_tb: Optional[float] = None, max_tb: Optional[float] = None,
               limit: Optional[int] = 12, condition: Optional[str] = None,
               timeout: int = 12, verbose: bool = False) -> DealsResult:
@@ -1153,6 +1175,7 @@ def get_deals(min_tb: Optional[float] = None, max_tb: Optional[float] = None,
         filtered.append(d)
 
     filtered.sort(key=lambda d: d.price_per_tb)
+    filtered = _diversify_by_capacity(filtered)
     if limit is not None and limit > 0:
         filtered = filtered[:limit]
     return DealsResult(deals=filtered, sources=statuses)

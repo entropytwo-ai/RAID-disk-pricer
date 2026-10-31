@@ -486,6 +486,13 @@ with no in-stock variant are excluded), `$/TB` is computed, condition/tier is
 inferred from the title (Recertified / New / NAS / Enterprise), results are
 de-duplicated across pages/sources and sorted ascending by `$/TB`.
 
+**Capacity diversity.** Retailers often carry dozens of near-identical SKUs at the
+*same* capacity and price (e.g. a wall of "12 TB @ $299" HP recerts), which would
+otherwise fill the whole list. After ranking, results are thinned to at most **2
+listings per capacity**, and those two must have **different prices** — so the
+ranking stays varied across drive sizes instead of repeating one deal. The
+cheapest listings always survive the trim (it runs on the already-sorted list).
+
 ### CLI
 
 ```
