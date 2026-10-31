@@ -234,41 +234,86 @@ function renderCompare(data) {
 }
 
 // ---- actions --------------------------------------------------------------
-// Remember the values the user typed in these fields, so they survive a reload.
-const PERSISTED_FIELDS = {
-  size: "raidArchitect.lastSize",          // Per-drive size
-  capacity: "raidArchitect.lastCapacity",  // Target usable capacity
-};
+// ---- form persistence -----------------------------------------------------
+// Remember every configure field so the whole form survives a reload/refresh.
+const STORE_KEY = "raidArchitect.form";          // single JSON blob of all fields
+// Value fields (text / number / <select>) persisted by element id.
+const PERSISTED_IDS = [
+  "size", "capacity", "drives", "level", "fault",
+  "groups", "group_size", "hot_spare",
+  "rate_refurb", "rate_nas", "rate_ent", "price_per_drive",
+];
+// Radio groups persisted by their shared name.
+const PERSISTED_RADIOS = ["mode", "pricing_source"];
+// Original defaults captured from the DOM at load, before anything is restored.
+let FORM_DEFAULTS = null;
+
+function readForm() {
+  const state = {};
+  for (const id of PERSISTED_IDS) {
+    const el = $(id);
+    if (el) state[id] = el.value;
+  }
+  for (const name of PERSISTED_RADIOS) {
+    const sel = document.querySelector(`input[name="${name}"]:checked`);
+    if (sel) state["radio:" + name] = sel.value;
+  }
+  return state;
+}
+
+function applyForm(state) {
+  if (!state) return;
+  for (const id of PERSISTED_IDS) {
+    if (id in state) { const el = $(id); if (el) el.value = state[id]; }
+  }
+  for (const name of PERSISTED_RADIOS) {
+    const key = "radio:" + name;
+    if (key in state) {
+      const r = document.querySelector(
+        `input[name="${name}"][value="${state[key]}"]`);
+      if (r) r.checked = true;
+    }
+  }
+}
+
 function rememberFields() {
   try {
-    for (const [id, key] of Object.entries(PERSISTED_FIELDS)) {
-      const el = $(id);
-      if (!el) continue;
-      const v = el.value.trim();
-      if (v) localStorage.setItem(key, v);
-    }
+    localStorage.setItem(STORE_KEY, JSON.stringify(readForm()));
   } catch (_) { /* storage unavailable (private mode, etc.) — no-op */ }
 }
 function restoreFields() {
   try {
-    for (const [id, key] of Object.entries(PERSISTED_FIELDS)) {
-      const el = $(id);
-      if (!el) continue;
-      const v = localStorage.getItem(key);
-      if (v) el.value = v;
-    }
-  } catch (_) { /* storage unavailable — keep the defaults */ }
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) applyForm(JSON.parse(raw));
+  } catch (_) { /* storage unavailable or corrupt — keep the defaults */ }
 }
 function wireFieldPersistence() {
-  for (const id of Object.keys(PERSISTED_FIELDS)) {
+  for (const id of PERSISTED_IDS) {
     const el = $(id);
-    if (el) el.addEventListener("input", rememberFields);
+    if (el) {
+      el.addEventListener("input", rememberFields);
+      el.addEventListener("change", rememberFields); // <select>
+    }
   }
+  for (const name of PERSISTED_RADIOS) {
+    document.querySelectorAll(`input[name="${name}"]`).forEach(
+      (r) => r.addEventListener("change", rememberFields));
+  }
+}
+
+// Clear all saved values and restore the original defaults, then re-plan.
+function resetToDefaults() {
+  try { localStorage.removeItem(STORE_KEY); } catch (_) { /* no-op */ }
+  applyForm(FORM_DEFAULTS);
+  syncMode();
+  syncLevel();
+  syncSource();
+  doPlan();
 }
 
 async function doPlan(e) {
   if (e) e.preventDefault();
-  rememberFields(); // persist the typed values before planning
+  rememberFields(); // persist the current form before planning
   const btn = $("planBtn");
   btn.disabled = true;
   setStatus("loading", "Computing array plan…");
@@ -398,6 +443,7 @@ async function init() {
   $("level").addEventListener("change", syncLevel);
   $("planForm").addEventListener("submit", doPlan);
   $("compareBtn").addEventListener("click", doCompare);
+  $("resetBtn").addEventListener("click", resetToDefaults);
 
   // Metric toggle for the Baseline|Live|Δ table (Total / $per-drive / $per-TB).
   document.querySelectorAll(".cmp-metric-toggle .chip").forEach((chip) => {
@@ -422,8 +468,9 @@ async function init() {
     $("verTag").textContent = "v" + META.version;
   } catch (_) { /* level dropdown still has the Auto option */ }
 
-  restoreFields();        // bring back the last values the user typed
-  wireFieldPersistence(); // and keep them saved as they type
+  FORM_DEFAULTS = readForm(); // capture the original defaults before restoring
+  restoreFields();            // bring back the last values the user used
+  wireFieldPersistence();     // and keep them saved as they change
   syncMode();
   syncLevel();
   syncSource();
