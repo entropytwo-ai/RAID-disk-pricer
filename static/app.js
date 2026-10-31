@@ -234,8 +234,24 @@ function renderCompare(data) {
 }
 
 // ---- actions --------------------------------------------------------------
+// Remember the per-drive size the user typed, so it survives a page reload.
+const SIZE_STORE_KEY = "raidArchitect.lastSize";
+function rememberSize() {
+  try {
+    const v = $("size").value.trim();
+    if (v) localStorage.setItem(SIZE_STORE_KEY, v);
+  } catch (_) { /* storage unavailable (private mode, etc.) — no-op */ }
+}
+function restoreSize() {
+  try {
+    const v = localStorage.getItem(SIZE_STORE_KEY);
+    if (v) $("size").value = v;
+  } catch (_) { /* storage unavailable — keep the default */ }
+}
+
 async function doPlan(e) {
   if (e) e.preventDefault();
+  rememberSize(); // persist the capacity entered before planning
   const btn = $("planBtn");
   btn.disabled = true;
   setStatus("loading", "Computing array plan…");
@@ -389,6 +405,7 @@ async function init() {
     $("verTag").textContent = "v" + META.version;
   } catch (_) { /* level dropdown still has the Auto option */ }
 
+  restoreSize(); // bring back the last per-drive size the user planned with
   syncMode();
   syncLevel();
   syncSource();
